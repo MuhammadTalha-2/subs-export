@@ -1,0 +1,42 @@
+export const UNIFIED_FIELDS = [
+  { key: "subscription_id", label: "Subscription ID", type: "string" },
+  { key: "customer_id", label: "Customer ID", type: "string" },
+  { key: "customer_email", label: "Email", type: "string" },
+  { key: "customer_first_name", label: "First Name", type: "string" },
+  { key: "customer_last_name", label: "Last Name", type: "string" },
+  { key: "customer_phone", label: "Phone", type: "string" },
+  { key: "customer_tag", label: "Customer Tags", type: "string" },
+  { key: "subscription_status", label: "Status", type: "enum" },
+  { key: "product_title", label: "Product", type: "string" },
+  { key: "variant_title", label: "Variant", type: "string" },
+  { key: "sku", label: "SKU", type: "string" },
+  { key: "quantity", label: "Qty", type: "integer" },
+  { key: "price_per_cycle", label: "Price/Cycle", type: "decimal" },
+  { key: "currency", label: "Currency", type: "string" },
+  { key: "billing_interval", label: "Billing Interval", type: "string" },
+  { key: "billing_interval_unit", label: "Interval Unit", type: "enum" },
+  { key: "next_charge_date", label: "Next Charge", type: "date" },
+  { key: "last_charge_date", label: "Last Charge", type: "date" },
+  { key: "subscription_start_date", label: "Start Date", type: "date" },
+  { key: "cancellation_date", label: "Cancelled On", type: "date" },
+  { key: "cancellation_reason", label: "Cancel Reason", type: "string" },
+  { key: "total_charges_to_date", label: "Total Charges", type: "integer" },
+  { key: "total_revenue_to_date", label: "Total Revenue", type: "decimal" },
+  { key: "discount_code", label: "Discount Code", type: "string" },
+  { key: "discount_value", label: "Discount Value", type: "decimal" },
+  { key: "shipping_address_1", label: "Address", type: "string" },
+  { key: "shipping_city", label: "City", type: "string" },
+  { key: "shipping_province", label: "Province", type: "string" },
+  { key: "shipping_country", label: "Country", type: "string" },
+  { key: "shipping_zip", label: "ZIP", type: "string" },
+];
+
+export const STATUS_VALUES = [
+  "active",
+  "paused",
+  "cancelled",
+  "expired",
+  "failed",
+];
+
+export const INTERVAL_UNITS = ["day", "week", "month", "year"];

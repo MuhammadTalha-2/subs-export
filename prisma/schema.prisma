@@ -8,21 +8,96 @@ datasource db {
 }
 
 model Session {
-  id            String    @id
-  shop          String
-  state         String
-  isOnline      Boolean   @default(false)
-  scope         String?
-  expires       DateTime?
-  accessToken   String
-  userId        BigInt?
-  firstName     String?
-  lastName      String?
-  email         String?
-  accountOwner  Boolean   @default(false)
-  locale        String?
-  collaborator  Boolean?  @default(false)
-  emailVerified Boolean?  @default(false)
+  id                  String    @id
+  shop                String
+  state               String
+  isOnline            Boolean   @default(false)
+  scope               String?
+  expires             DateTime?
+  accessToken         String
+  userId              BigInt?
+  firstName           String?
+  lastName            String?
+  email               String?
+  accountOwner        Boolean   @default(false)
+  locale              String?
+  collaborator        Boolean?  @default(false)
+  emailVerified       Boolean?  @default(false)
   refreshToken        String?
   refreshTokenExpires DateTime?
+}
+
+model Shop {
+  id                 String    @id @default(uuid())
+  shopDomain         String    @unique @map("shop_domain")
+  plan               String    @default("free")
+  monthlyExportCount Int       @default(0) @map("monthly_export_count")
+  billingCycleStart  DateTime? @map("billing_cycle_start")
+  installedAt        DateTime  @default(now()) @map("installed_at")
+  uninstalledAt      DateTime? @map("uninstalled_at")
+
+  connections      AppConnection[]
+  exportJobs       ExportJob[]
+  scheduledExports ScheduledExport[]
+
+  @@map("shops")
+}
+
+model AppConnection {
+  id              String    @id @default(uuid())
+  shopId          String    @map("shop_id")
+  appName         String    @map("app_name")
+  apiKeyEnc       String?   @map("api_key_enc")
+  oauthTokenEnc   String?   @map("oauth_token_enc")
+  refreshTokenEnc String?   @map("refresh_token_enc")
+  tokenExpiresAt  DateTime? @map("token_expires_at")
+  status          String    @default("disconnected")
+  lastVerifiedAt  DateTime? @map("last_verified_at")
+  createdAt       DateTime  @default(now()) @map("created_at")
+
+  shop Shop @relation(fields: [shopId], references: [id], onDelete: Cascade)
+
+  @@unique([shopId, appName])
+  @@map("app_connections")
+}
+
+model ExportJob {
+  id           String    @id @default(uuid())
+  shopId       String    @map("shop_id")
+  filtersJson  Json?     @map("filters_json")
+  format       String
+  status       String    @default("queued")
+  rowCount     Int?      @map("row_count")
+  filePath     String?   @map("file_path")
+  errorMessage String?   @map("error_message")
+  createdAt    DateTime  @default(now()) @map("created_at")
+  completedAt  DateTime? @map("completed_at")
+
+  shop       Shop             @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  schedule   ScheduledExport? @relation(fields: [scheduleId], references: [id], onDelete: SetNull)
+  scheduleId String?          @map("schedule_id")
+
+  @@map("export_jobs")
+}
+
+model ScheduledExport {
+  id             String    @id @default(uuid())
+  shopId         String    @map("shop_id")
+  frequency      String
+  dayOfWeek      Int?      @map("day_of_week")
+  hour           Int
+  timezone       String
+  deliveryMethod String    @map("delivery_method")
+  email          String?
+  filtersJson    Json?     @map("filters_json")
+  format         String    @default("csv")
+  isActive       Boolean   @default(true) @map("is_active")
+  lastRunAt      DateTime? @map("last_run_at")
+  nextRunAt      DateTime? @map("next_run_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
+
+  shop       Shop        @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  exportJobs ExportJob[]
+
+  @@map("scheduled_exports")
 }

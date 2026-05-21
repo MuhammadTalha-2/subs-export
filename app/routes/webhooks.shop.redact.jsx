@@ -2,24 +2,19 @@ import { authenticate } from "../shopify.server";
 import db from "../db.server";
 
 export const action = async ({ request }) => {
-  const { shop, session, topic } = await authenticate.webhook(request);
+  const { shop, topic } = await authenticate.webhook(request);
 
   console.log(`Received ${topic} webhook for ${shop}`);
-
-  if (session) {
-    await db.session.deleteMany({ where: { shop } });
-  }
 
   const existingShop = await db.shop.findUnique({
     where: { shopDomain: shop },
   });
 
   if (existingShop) {
-    await db.shop.update({
-      where: { shopDomain: shop },
-      data: { uninstalledAt: new Date() },
-    });
+    await db.shop.delete({ where: { shopDomain: shop } });
   }
+
+  await db.session.deleteMany({ where: { shop } });
 
   return new Response();
 };
