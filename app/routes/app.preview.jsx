@@ -14,7 +14,6 @@ import {
   Select,
   ChoiceList,
   Pagination,
-  EmptyState,
   Spinner,
   Banner,
   Box,
@@ -30,6 +29,7 @@ import {
   ViewIcon,
   SearchIcon,
   ChevronRightIcon,
+  LinkIcon,
 } from "@shopify/polaris-icons";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
@@ -439,24 +439,40 @@ export default function PreviewPage() {
     return (
       <Page>
         <ui-title-bar title="Preview" />
-        <Layout>
-          <Layout.Section>
-            <Card>
-              <EmptyState
-                heading="No apps connected"
-                action={{
-                  content: "Connect an app",
-                  onAction: () => navigate("/app/connections"),
-                }}
-                image="https://cdn.shopify.com/s/files/1/0262/4071/2726/files/emptystate-files.png"
+        <Card>
+          <Box paddingBlock="1000">
+            <BlockStack gap="400" inlineAlign="center">
+              <Box
+                background="bg-surface-secondary"
+                padding="400"
+                borderRadius="full"
               >
-                <p>
-                  Connect a subscription app first to preview your data.
-                </p>
-              </EmptyState>
-            </Card>
-          </Layout.Section>
-        </Layout>
+                <Icon source={ViewIcon} tone="subdued" />
+              </Box>
+              <BlockStack gap="100" inlineAlign="center">
+                <Text as="p" variant="headingMd">
+                  Nothing to preview yet
+                </Text>
+                <Text
+                  as="p"
+                  variant="bodyMd"
+                  tone="subdued"
+                  alignment="center"
+                >
+                  Connect a subscription app to see all your subscribers in
+                  one unified view — searchable, sortable, and filterable.
+                </Text>
+              </BlockStack>
+              <Button
+                variant="primary"
+                icon={LinkIcon}
+                onClick={() => navigate("/app/connections")}
+              >
+                Connect your first app
+              </Button>
+            </BlockStack>
+          </Box>
+        </Card>
       </Page>
     );
   }
@@ -652,14 +668,33 @@ export default function PreviewPage() {
                     />
                   </div>
                 ) : (
-                  <Box paddingBlock="600">
-                    <BlockStack gap="200" inlineAlign="center">
-                      <Text as="p" variant="bodyMd" tone="subdued" alignment="center">
-                        No subscriptions match the current filters.
-                      </Text>
+                  <Box paddingBlock="800">
+                    <BlockStack gap="300" inlineAlign="center">
+                      <Box
+                        background="bg-surface-secondary"
+                        padding="300"
+                        borderRadius="full"
+                      >
+                        <Icon source={SearchIcon} tone="subdued" />
+                      </Box>
+                      <BlockStack gap="100" inlineAlign="center">
+                        <Text as="p" variant="headingSm">
+                          No matches found
+                        </Text>
+                        <Text
+                          as="p"
+                          variant="bodySm"
+                          tone="subdued"
+                          alignment="center"
+                        >
+                          {hasActiveFilters
+                            ? "Try adjusting your search or filters to find what you're looking for."
+                            : "Your connected apps returned no subscriptions yet."}
+                        </Text>
+                      </BlockStack>
                       {hasActiveFilters && (
                         <Button onClick={handleClearFilters}>
-                          Clear filters
+                          Clear all filters
                         </Button>
                       )}
                     </BlockStack>

@@ -26,11 +26,6 @@ async function paywhirlRequest(endpoint, creds, retries = 0) {
     headers: headers(creds.apiKey, creds.apiSecret),
   });
 
-  if (process.env.NODE_ENV !== "production") {
-    console.log(
-      `[PayWhirl] ${creds.variant} ${url} → ${res.status} (keyPrefix=${(creds.apiKey || "").slice(0, 6)})`,
-    );
-  }
 
   if (res.status === 401 || res.status === 403) {
     let bodyText = "";

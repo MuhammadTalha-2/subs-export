@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import { useLoaderData, useNavigate } from "react-router";
 import {
   Page,
@@ -66,6 +66,10 @@ import {
 import { generateDemoData } from "../services/demo-data.server";
 import { getGoogleAuthStatus } from "../services/google-auth.server";
 import { computeCohortRetention } from "../utils/cohort.server";
+import OnboardingTour, {
+  shouldShowOnboarding,
+  resetOnboarding,
+} from "../components/OnboardingTour";
 
 export const loader = async ({ request }) => {
   const { session } = await authenticate.admin(request);
@@ -138,10 +142,21 @@ export const loader = async ({ request }) => {
       let overdueCount = 0;
       let recentlyCancelledCount = 0;
 
-      const today = new Date().toISOString().split("T")[0];
-      const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000)
+      const now = new Date();
+      const today = now.toISOString().split("T")[0];
+      const thirtyDaysAgo = new Date(now.getTime() - 30 * 86400000)
         .toISOString()
         .split("T")[0];
+      const sixtyDaysAgo = new Date(now.getTime() - 60 * 86400000)
+        .toISOString()
+        .split("T")[0];
+
+      const period = {
+        newCurrent: 0,
+        newPrevious: 0,
+        churnedCurrent: 0,
+        churnedPrevious: 0,
+      };
 
       for (const row of allRows) {
         const status = row.subscription_status || "unknown";
@@ -167,7 +182,38 @@ export const loader = async ({ request }) => {
         ) {
           recentlyCancelledCount += 1;
         }
+
+        if (row.subscription_start_date) {
+          if (
+            row.subscription_start_date >= thirtyDaysAgo &&
+            row.subscription_start_date <= today
+          ) {
+            period.newCurrent += 1;
+          } else if (
+            row.subscription_start_date >= sixtyDaysAgo &&
+            row.subscription_start_date < thirtyDaysAgo
+          ) {
+            period.newPrevious += 1;
+          }
+        }
+
+        if (row.cancellation_date) {
+          if (
+            row.cancellation_date >= thirtyDaysAgo &&
+            row.cancellation_date <= today
+          ) {
+            period.churnedCurrent += 1;
+          } else if (
+            row.cancellation_date >= sixtyDaysAgo &&
+            row.cancellation_date < thirtyDaysAgo
+          ) {
+            period.churnedPrevious += 1;
+          }
+        }
       }
+
+      period.netCurrent = period.newCurrent - period.churnedCurrent;
+      period.netPrevious = period.newPrevious - period.churnedPrevious;
 
       const cohortData = computeCohortRetention(allRows, 6);
 
@@ -184,6 +230,7 @@ export const loader = async ({ request }) => {
           thirtyDaysAgo,
         },
         cohorts: cohortData,
+        period,
       };
     } catch (err) {
       console.error("Dashboard stats error:", err.message);
@@ -321,6 +368,62 @@ function CohortTable({ cohorts, monthsBack }) {
   );
 }
 
+function PeriodTile({ label, current, previous, invertedTone }) {
+  const diff = current - previous;
+  const pct =
+    previous === 0
+      ? current === 0
+        ? 0
+        : null
+      : ((diff / Math.abs(previous)) * 100);
+
+  const isPositive = diff > 0;
+  const isNegative = diff < 0;
+
+  let toneColor = "var(--p-color-text-secondary)";
+  if (invertedTone) {
+    if (isNegative) toneColor = "#0a5c2d";
+    if (isPositive) toneColor = "#a01919";
+  } else {
+    if (isPositive) toneColor = "#0a5c2d";
+    if (isNegative) toneColor = "#a01919";
+  }
+
+  const arrow = isPositive ? "↑" : isNegative ? "↓" : "→";
+  const deltaText =
+    pct === null
+      ? `+${Math.abs(diff)}`
+      : `${arrow} ${Math.abs(pct).toFixed(0)}%`;
+
+  return (
+    <Card>
+      <BlockStack gap="150">
+        <Text as="span" variant="bodySm" tone="subdued">
+          {label}
+        </Text>
+        <Text as="span" variant="heading2xl" fontWeight="bold">
+          {Math.abs(current).toLocaleString()}
+          {current < 0 ? " (net loss)" : ""}
+        </Text>
+        <InlineStack gap="200" blockAlign="center">
+          <span
+            style={{
+              color: toneColor,
+              fontSize: 13,
+              fontWeight: 600,
+            }}
+          >
+            {deltaText}
+          </span>
+          <Text as="span" variant="bodySm" tone="subdued">
+            vs prior 30d ({previous})
+          </Text>
+        </InlineStack>
+      </BlockStack>
+    </Card>
+  );
+}
+
 function AtRiskTile({ label, value, description, icon, tone, onClick }) {
   const toneBg = {
     critical: "bg-surface-critical",
@@ -445,6 +548,23 @@ export default function Index() {
 
   const [setupOpen, setSetupOpen] = useState(true);
   const [setupDismissed, setSetupDismissed] = useState(false);
+  const [tourOpen, setTourOpen] = useState(false);
+
+  useEffect(() => {
+    const shouldShow = shouldShowOnboarding({
+      hasConnections: connectedApps > 0,
+      hasExports: monthlyExportCount > 0,
+    });
+    if (shouldShow) {
+      const t = setTimeout(() => setTourOpen(true), 400);
+      return () => clearTimeout(t);
+    }
+  }, [connectedApps, monthlyExportCount]);
+
+  const handleReplayTour = useCallback(() => {
+    resetOnboarding();
+    setTourOpen(true);
+  }, []);
 
   const toggleSetup = useCallback(() => setSetupOpen((o) => !o), []);
   const dismissSetup = useCallback(() => setSetupDismissed(true), []);
@@ -519,6 +639,12 @@ export default function Index() {
                   </Badge>
                 </InlineStack>
                 <ButtonGroup>
+                  <Button
+                    variant="plain"
+                    onClick={handleReplayTour}
+                  >
+                    Replay tour
+                  </Button>
                   <Button
                     icon={setupOpen ? ChevronUpIcon : ChevronDownIcon}
                     variant="tertiary"
@@ -709,6 +835,46 @@ export default function Index() {
           </Card>
         )}
 
+        {subscriptionStats?.period && (
+          <BlockStack gap="300">
+            <BlockStack gap="100" inlineAlign="start">
+              <Text as="h2" variant="headingMd">
+                Last 30 Days
+              </Text>
+              <Text as="p" variant="bodySm" tone="subdued">
+                Subscription activity compared to the prior 30 days
+              </Text>
+            </BlockStack>
+
+            <InlineGrid columns={{ xs: 1, sm: 2, md: 4 }} gap="300">
+              <PeriodTile
+                label="New subscribers"
+                current={subscriptionStats.period.newCurrent}
+                previous={subscriptionStats.period.newPrevious}
+              />
+              <PeriodTile
+                label="Churned"
+                current={subscriptionStats.period.churnedCurrent}
+                previous={subscriptionStats.period.churnedPrevious}
+                invertedTone
+              />
+              <PeriodTile
+                label="Net change"
+                current={subscriptionStats.period.netCurrent}
+                previous={subscriptionStats.period.netPrevious}
+              />
+              <PeriodTile
+                label="Active total"
+                current={subscriptionStats.statusCounts?.active || 0}
+                previous={
+                  (subscriptionStats.statusCounts?.active || 0) -
+                  subscriptionStats.period.netCurrent
+                }
+              />
+            </InlineGrid>
+          </BlockStack>
+        )}
+
         {subscriptionStats?.cohorts && (
           <Card>
             <BlockStack gap="400">
@@ -783,12 +949,33 @@ export default function Index() {
                     increasedTableDensity
                   />
                 ) : (
-                  <Box paddingBlock="400">
-                    <BlockStack gap="200" inlineAlign="center">
-                      <Text as="p" variant="bodyMd" tone="subdued" alignment="center">
-                        No exports yet
-                      </Text>
-                      <Button onClick={() => navigate("/app/exports")} variant="primary">
+                  <Box paddingBlock="600">
+                    <BlockStack gap="300" inlineAlign="center">
+                      <Box
+                        background="bg-surface-secondary"
+                        padding="300"
+                        borderRadius="full"
+                      >
+                        <Icon source={ExportIcon} tone="subdued" />
+                      </Box>
+                      <BlockStack gap="100" inlineAlign="center">
+                        <Text as="p" variant="headingSm">
+                          No exports yet
+                        </Text>
+                        <Text
+                          as="p"
+                          variant="bodySm"
+                          tone="subdued"
+                          alignment="center"
+                        >
+                          Your export history will appear here once you create
+                          your first one.
+                        </Text>
+                      </BlockStack>
+                      <Button
+                        onClick={() => navigate("/app/exports")}
+                        variant="primary"
+                      >
                         Create your first export
                       </Button>
                     </BlockStack>
@@ -883,6 +1070,11 @@ export default function Index() {
 
         <Box paddingBlockEnd="400" />
       </BlockStack>
+
+      <OnboardingTour
+        open={tourOpen}
+        onClose={() => setTourOpen(false)}
+      />
     </Page>
   );
 }

@@ -1,6 +1,15 @@
-import { redirect, Form, useLoaderData } from "react-router";
+import { redirect, Form, useLoaderData, Link } from "react-router";
 import { login } from "../../shopify.server";
 import styles from "./styles.module.css";
+
+export const meta = () => [
+  { title: "SubsExport — Export subscription data from any Shopify subscription app" },
+  {
+    name: "description",
+    content:
+      "Unified exports from ReCharge, Skio, Seal, Loop, PayWhirl and more. CSV, Excel, or Google Sheets — on demand or on a schedule.",
+  },
+];
 
 export const loader = async ({ request }) => {
   const url = new URL(request.url);
@@ -12,43 +21,119 @@ export const loader = async ({ request }) => {
   return { showForm: Boolean(login) };
 };
 
+const FEATURES = [
+  {
+    title: "5+ subscription apps in one place",
+    body: "Connect ReCharge, Skio, Seal Subscriptions, Loop, PayWhirl and more. We normalize everything into a single 30-field schema you can trust.",
+  },
+  {
+    title: "Export to CSV, Excel, or Google Sheets",
+    body: "One-click exports in three formats. Push directly to your Google Drive or download locally. Save reusable templates for recurring reports.",
+  },
+  {
+    title: "Schedule + email or Slack delivery",
+    body: "Daily, weekly, or monthly automated exports delivered to your inbox or a Slack channel. Set it once and let your data flow.",
+  },
+  {
+    title: "Track health & retention",
+    body: "Surface failed payments, paused subscribers, cohort retention, and 30-day growth — so you spot churn before it happens.",
+  },
+  {
+    title: "Search, sort, drill down",
+    body: "Find any subscriber by email, product, or SKU. Sort any column. Click any row for full detail. Built for ops teams, not engineers.",
+  },
+  {
+    title: "Secure & compliant",
+    body: "API keys encrypted at rest with AES-256. GDPR-compliant data handling. Read-only access — we never modify your subscriptions.",
+  },
+];
+
 export default function App() {
   const { showForm } = useLoaderData();
 
   return (
-    <div className={styles.index}>
-      <div className={styles.content}>
-        <h1 className={styles.heading}>A short heading about [your app]</h1>
-        <p className={styles.text}>
-          A tagline about [your app] that describes your value proposition.
-        </p>
-        {showForm && (
-          <Form className={styles.form} method="post" action="/auth/login">
-            <label className={styles.label}>
-              <span>Shop domain</span>
-              <input className={styles.input} type="text" name="shop" />
-              <span>e.g: my-shop-domain.myshopify.com</span>
-            </label>
-            <button className={styles.button} type="submit">
-              Log in
-            </button>
-          </Form>
-        )}
-        <ul className={styles.list}>
-          <li>
-            <strong>Product feature</strong>. Some detail about your feature and
-            its benefit to your customer.
-          </li>
-          <li>
-            <strong>Product feature</strong>. Some detail about your feature and
-            its benefit to your customer.
-          </li>
-          <li>
-            <strong>Product feature</strong>. Some detail about your feature and
-            its benefit to your customer.
-          </li>
-        </ul>
-      </div>
+    <div className={styles.page}>
+      <header className={styles.header}>
+        <div className={styles.headerInner}>
+          <div className={styles.logo}>
+            <span className={styles.logoMark}>S</span>
+            <span>SubsExport</span>
+          </div>
+          <nav className={styles.nav}>
+            <Link to="/privacy">Privacy</Link>
+            <Link to="/terms">Terms</Link>
+            <Link to="/support">Support</Link>
+          </nav>
+        </div>
+      </header>
+
+      <section className={styles.hero}>
+        <div className={styles.heroInner}>
+          <span className={styles.eyebrow}>SUBSCRIPTION DATA, UNIFIED</span>
+          <h1 className={styles.heading}>
+            Export subscription data from every Shopify subscription app
+          </h1>
+          <p className={styles.subhead}>
+            ReCharge, Skio, Seal, Loop, PayWhirl — all in one dashboard.
+            Export to CSV, Excel, or Google Sheets, on demand or on a schedule.
+          </p>
+
+          {showForm && (
+            <Form className={styles.form} method="post" action="/auth/login">
+              <label className={styles.label} htmlFor="shop">
+                <span className={styles.labelText}>Sign in with your Shopify store</span>
+              </label>
+              <div className={styles.formRow}>
+                <input
+                  id="shop"
+                  className={styles.input}
+                  type="text"
+                  name="shop"
+                  placeholder="my-shop.myshopify.com"
+                  autoComplete="off"
+                />
+                <button className={styles.button} type="submit">
+                  Continue
+                </button>
+              </div>
+              <span className={styles.formHint}>
+                e.g. <code>my-shop-domain.myshopify.com</code>
+              </span>
+            </Form>
+          )}
+        </div>
+      </section>
+
+      <section className={styles.features}>
+        <div className={styles.featuresInner}>
+          <h2 className={styles.sectionHeading}>Built for subscription ops teams</h2>
+          <div className={styles.featureGrid}>
+            {FEATURES.map((feature) => (
+              <div key={feature.title} className={styles.featureCard}>
+                <h3 className={styles.featureTitle}>{feature.title}</h3>
+                <p className={styles.featureBody}>{feature.body}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      <footer className={styles.footer}>
+        <div className={styles.footerInner}>
+          <div className={styles.footerBrand}>
+            <span className={styles.logoMark}>S</span>
+            <span>SubsExport</span>
+          </div>
+          <nav className={styles.footerNav}>
+            <Link to="/privacy">Privacy Policy</Link>
+            <Link to="/terms">Terms of Service</Link>
+            <Link to="/support">Support</Link>
+          </nav>
+          <p className={styles.copyright}>
+            © {new Date().getFullYear()} Add One Plugins. Built for Shopify merchants.
+          </p>
+        </div>
+      </footer>
     </div>
   );
 }

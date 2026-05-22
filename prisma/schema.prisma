@@ -39,6 +39,7 @@ model Shop {
   connections      AppConnection[]
   exportJobs       ExportJob[]
   scheduledExports ScheduledExport[]
+  exportTemplates  ExportTemplate[]
   googleAuth       GoogleAuth?
 
   @@map("shops")
@@ -96,21 +97,39 @@ model ExportJob {
   @@map("export_jobs")
 }
 
+model ExportTemplate {
+  id          String    @id @default(uuid())
+  shopId      String    @map("shop_id")
+  name        String
+  format      String    @default("csv")
+  filtersJson Json?     @map("filters_json")
+  columnsJson Json?     @map("columns_json")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+  lastRunAt   DateTime? @map("last_run_at")
+  runCount    Int       @default(0) @map("run_count")
+
+  shop Shop @relation(fields: [shopId], references: [id], onDelete: Cascade)
+
+  @@map("export_templates")
+}
+
 model ScheduledExport {
-  id             String    @id @default(uuid())
-  shopId         String    @map("shop_id")
-  frequency      String
-  dayOfWeek      Int?      @map("day_of_week")
-  hour           Int
-  timezone       String
-  deliveryMethod String    @map("delivery_method")
-  email          String?
-  filtersJson    Json?     @map("filters_json")
-  format         String    @default("csv")
-  isActive       Boolean   @default(true) @map("is_active")
-  lastRunAt      DateTime? @map("last_run_at")
-  nextRunAt      DateTime? @map("next_run_at")
-  createdAt      DateTime  @default(now()) @map("created_at")
+  id                 String    @id @default(uuid())
+  shopId             String    @map("shop_id")
+  frequency          String
+  dayOfWeek          Int?      @map("day_of_week")
+  hour               Int
+  timezone           String
+  deliveryMethod     String    @map("delivery_method")
+  email              String?
+  slackWebhookUrlEnc String?   @map("slack_webhook_url_enc")
+  filtersJson        Json?     @map("filters_json")
+  format             String    @default("csv")
+  isActive           Boolean   @default(true) @map("is_active")
+  lastRunAt          DateTime? @map("last_run_at")
+  nextRunAt          DateTime? @map("next_run_at")
+  createdAt          DateTime  @default(now()) @map("created_at")
 
   shop       Shop        @relation(fields: [shopId], references: [id], onDelete: Cascade)
   exportJobs ExportJob[]

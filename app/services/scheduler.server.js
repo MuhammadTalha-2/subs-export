@@ -1,9 +1,21 @@
 import db from "../db.server";
-import { processExport, getExportFilePath } from "./export.server";
+import { processExport } from "./export.server";
 import { sendExportEmail } from "./email.server";
+import { sendSlackExportNotification } from "./slack.server";
+import { decrypt } from "../utils/encryption.server";
 import { join } from "path";
 
 const EXPORTS_DIR = join(process.cwd(), "exports");
+
+function scheduleLabel(schedule) {
+  if (schedule.frequency === "daily") return `Daily at ${schedule.hour}:00 UTC`;
+  if (schedule.frequency === "weekly") {
+    const days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    return `Weekly ${days[schedule.dayOfWeek ?? 1]} at ${schedule.hour}:00 UTC`;
+  }
+  if (schedule.frequency === "monthly") return `Monthly at ${schedule.hour}:00 UTC`;
+  return schedule.frequency;
+}
 
 export async function runDueSchedules() {
   const now = new Date();
@@ -56,6 +68,26 @@ async function executeScheduledExport(schedule) {
       rowCount: updatedJob.rowCount || 0,
       format: schedule.format,
     });
+  }
+
+  if (
+    schedule.deliveryMethod === "slack" &&
+    schedule.slackWebhookUrlEnc &&
+    updatedJob.filePath
+  ) {
+    try {
+      const webhookUrl = decrypt(schedule.slackWebhookUrlEnc);
+      await sendSlackExportNotification({
+        webhookUrl,
+        shopDomain: schedule.shop.shopDomain,
+        format: schedule.format,
+        rowCount: updatedJob.rowCount || 0,
+        filePath: updatedJob.filePath,
+        scheduleLabel: scheduleLabel(schedule),
+      });
+    } catch (err) {
+      console.error(`Slack delivery failed for schedule ${schedule.id}:`, err.message);
+    }
   }
 
   const nextRunAt = computeNextRun(schedule);

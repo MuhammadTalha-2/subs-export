@@ -35,8 +35,9 @@ import { pushToGoogleSheets } from "./google-sheets.server";
 
 const EXPORTS_DIR = join(process.cwd(), "exports");
 
+// Plan limits disabled during development. Re-enable tiered limits after Shopify approval + billing setup.
 const PLAN_LIMITS = {
-  free: { maxExports: 5, maxRows: 500 },
+  free: { maxExports: Infinity, maxRows: Infinity },
   starter: { maxExports: 30, maxRows: 5000 },
   growth: { maxExports: 100, maxRows: 25000 },
   pro: { maxExports: Infinity, maxRows: Infinity },
@@ -56,15 +57,8 @@ function buildFilename(shopDomain, format, filters) {
 }
 
 export async function checkExportLimits(shop) {
+  // Limits disabled during development. Re-enable after Shopify approval.
   const limits = PLAN_LIMITS[shop.plan] || PLAN_LIMITS.free;
-
-  if (shop.monthlyExportCount >= limits.maxExports) {
-    return {
-      allowed: false,
-      reason: `Monthly export limit reached (${limits.maxExports} exports on ${shop.plan} plan). Upgrade to export more.`,
-    };
-  }
-
   return { allowed: true, maxRows: limits.maxRows };
 }
 

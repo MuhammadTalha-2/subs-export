@@ -5,10 +5,13 @@ export const action = async ({ request }) => {
     return new Response("Method not allowed", { status: 405 });
   }
 
-  const authHeader = request.headers.get("Authorization");
   const expectedToken = process.env.SCHEDULER_SECRET;
+  if (!expectedToken) {
+    return new Response("Scheduler not configured", { status: 503 });
+  }
 
-  if (expectedToken && authHeader !== `Bearer ${expectedToken}`) {
+  const authHeader = request.headers.get("Authorization");
+  if (authHeader !== `Bearer ${expectedToken}`) {
     return new Response("Unauthorized", { status: 401 });
   }
 

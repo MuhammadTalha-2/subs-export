@@ -11,16 +11,18 @@ import {
   Button,
   DataTable,
   ChoiceList,
-  EmptyState,
   Banner,
   Divider,
   Box,
   Icon,
   InlineGrid,
   Tooltip,
+  Modal,
+  TextField,
 } from "@shopify/polaris";
 import {
   ExportIcon,
+  LinkIcon,
   DeleteIcon,
   ImportIcon,
   ExternalIcon,
@@ -65,6 +67,16 @@ export const loader = async ({ request }) => {
   const limitCheck = await checkExportLimits(shop);
   const googleAuth = await getGoogleAuthStatus(shop.id);
 
+  let templates = [];
+  try {
+    templates = await db.exportTemplate.findMany({
+      where: { shopId: shop.id },
+      orderBy: { createdAt: "desc" },
+    });
+  } catch (err) {
+    console.error("ExportTemplate read failed (migration may be pending):", err.message);
+  }
+
   let totalRowsExported = 0;
   let completedCount = 0;
   for (const e of exports) {
@@ -85,6 +97,14 @@ export const loader = async ({ request }) => {
       createdAt: e.createdAt,
       completedAt: e.completedAt,
       filters: e.filtersJson,
+    })),
+    templates: templates.map((t) => ({
+      id: t.id,
+      name: t.name,
+      format: t.format,
+      filters: t.filtersJson,
+      lastRunAt: t.lastRunAt,
+      runCount: t.runCount,
     })),
     hasConnections: connections.length > 0,
     exportCount: shop.monthlyExportCount,
@@ -143,6 +163,75 @@ export const action = async ({ request }) => {
     }
 
     return { error: "Export not found." };
+  }
+
+  if (intent === "save_template") {
+    const name = (formData.get("name") || "").toString().trim();
+    if (!name) {
+      return { error: "Template name is required." };
+    }
+    const format = formData.get("format") || "csv";
+    const statusFilter = formData.getAll("status");
+    const filters = {};
+    if (statusFilter.length > 0) filters.status = statusFilter;
+
+    await db.exportTemplate.create({
+      data: {
+        shopId: shop.id,
+        name,
+        format,
+        filtersJson: Object.keys(filters).length > 0 ? filters : undefined,
+      },
+    });
+
+    return { success: `Template "${name}" saved.` };
+  }
+
+  if (intent === "run_template") {
+    const limitCheck = await checkExportLimits(shop);
+    if (!limitCheck.allowed) {
+      return { error: limitCheck.reason };
+    }
+
+    const templateId = formData.get("templateId");
+    const template = await db.exportTemplate.findFirst({
+      where: { id: templateId, shopId: shop.id },
+    });
+
+    if (!template) {
+      return { error: "Template not found." };
+    }
+
+    const job = await db.exportJob.create({
+      data: {
+        shopId: shop.id,
+        format: template.format,
+        filtersJson: template.filtersJson || undefined,
+        status: "queued",
+      },
+    });
+
+    try {
+      await processExport(job.id);
+      await db.exportTemplate.update({
+        where: { id: template.id },
+        data: {
+          lastRunAt: new Date(),
+          runCount: { increment: 1 },
+        },
+      });
+      return { success: `Export from "${template.name}" completed.` };
+    } catch (error) {
+      return { error: `Export failed: ${error.message}` };
+    }
+  }
+
+  if (intent === "delete_template") {
+    const templateId = formData.get("templateId");
+    await db.exportTemplate.deleteMany({
+      where: { id: templateId, shopId: shop.id },
+    });
+    return { success: "Template deleted." };
   }
 
   return { error: "Unknown action." };
@@ -215,6 +304,7 @@ function formatBadgeTone(fmt) {
 export default function ExportsPage() {
   const {
     exports: exportList,
+    templates = [],
     hasConnections,
     exportCount,
     canExport,
@@ -229,6 +319,8 @@ export default function ExportsPage() {
   const [format, setFormat] = useState(["csv"]);
   const [statusFilter, setStatusFilter] = useState([]);
   const [activeJobId, setActiveJobId] = useState(null);
+  const [saveModalOpen, setSaveModalOpen] = useState(false);
+  const [templateName, setTemplateName] = useState("");
 
   const isSubmitting = fetcher.state !== "idle";
   const result = fetcher.data;
@@ -304,26 +396,79 @@ export default function ExportsPage() {
     [fetcher],
   );
 
+  const handleSaveTemplate = useCallback(() => {
+    if (!templateName.trim()) return;
+    setActiveJobId("save_template");
+    const formData = new FormData();
+    formData.set("intent", "save_template");
+    formData.set("name", templateName.trim());
+    formData.set("format", format[0] || "csv");
+    statusFilter.forEach((s) => formData.append("status", s));
+    fetcher.submit(formData, { method: "POST" });
+    setTemplateName("");
+    setSaveModalOpen(false);
+  }, [fetcher, templateName, format, statusFilter]);
+
+  const handleRunTemplate = useCallback(
+    (templateId) => {
+      setActiveJobId(`run:${templateId}`);
+      const formData = new FormData();
+      formData.set("intent", "run_template");
+      formData.set("templateId", templateId);
+      fetcher.submit(formData, { method: "POST" });
+    },
+    [fetcher],
+  );
+
+  const handleDeleteTemplate = useCallback(
+    (templateId) => {
+      setActiveJobId(`delete:${templateId}`);
+      const formData = new FormData();
+      formData.set("intent", "delete_template");
+      formData.set("templateId", templateId);
+      fetcher.submit(formData, { method: "POST" });
+    },
+    [fetcher],
+  );
+
   if (!hasConnections) {
     return (
       <Page>
         <ui-title-bar title="Exports" />
-        <Layout>
-          <Layout.Section>
-            <Card>
-              <EmptyState
-                heading="No apps connected"
-                action={{
-                  content: "Connect an app",
-                  onAction: () => navigate("/app/connections"),
-                }}
-                image="https://cdn.shopify.com/s/files/1/0262/4071/2726/files/emptystate-files.png"
+        <Card>
+          <Box paddingBlock="1000">
+            <BlockStack gap="400" inlineAlign="center">
+              <Box
+                background="bg-surface-secondary"
+                padding="400"
+                borderRadius="full"
               >
-                <p>Connect a subscription app first to start exporting data.</p>
-              </EmptyState>
-            </Card>
-          </Layout.Section>
-        </Layout>
+                <Icon source={ExportIcon} tone="subdued" />
+              </Box>
+              <BlockStack gap="100" inlineAlign="center">
+                <Text as="p" variant="headingMd">
+                  Nothing to export yet
+                </Text>
+                <Text
+                  as="p"
+                  variant="bodyMd"
+                  tone="subdued"
+                  alignment="center"
+                >
+                  Connect a subscription app to start exporting subscribers as
+                  CSV, Excel, or Google Sheets — one click or on a schedule.
+                </Text>
+              </BlockStack>
+              <Button
+                variant="primary"
+                icon={LinkIcon}
+                onClick={() => navigate("/app/connections")}
+              >
+                Connect your first app
+              </Button>
+            </BlockStack>
+          </Box>
+        </Card>
       </Page>
     );
   }
@@ -423,6 +568,119 @@ export default function ExportsPage() {
           />
         </InlineGrid>
 
+        {templates.length > 0 && (
+          <Card>
+            <BlockStack gap="300">
+              <InlineStack align="space-between" blockAlign="center">
+                <BlockStack gap="050">
+                  <InlineStack gap="200" blockAlign="center">
+                    <Text as="h2" variant="headingMd">
+                      Saved Templates
+                    </Text>
+                    <Badge>{templates.length}</Badge>
+                  </InlineStack>
+                  <Text as="p" variant="bodySm" tone="subdued">
+                    One-click re-run of saved export configs
+                  </Text>
+                </BlockStack>
+              </InlineStack>
+
+              <Divider />
+
+              <InlineGrid columns={{ xs: 1, sm: 2, lg: 3 }} gap="300">
+                {templates.map((tmpl) => (
+                  <div
+                    key={tmpl.id}
+                    style={{
+                      padding: "16px",
+                      border: "1px solid var(--p-color-border-secondary)",
+                      borderRadius: "var(--p-border-radius-200)",
+                      background: "var(--p-color-bg-surface)",
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: "12px",
+                    }}
+                  >
+                    <div
+                      style={{
+                        display: "flex",
+                        justifyContent: "space-between",
+                        alignItems: "flex-start",
+                        gap: "8px",
+                      }}
+                    >
+                      <Text as="span" variant="bodyMd" fontWeight="semibold">
+                        {tmpl.name}
+                      </Text>
+                      <Tooltip content="Delete template">
+                        <Button
+                          icon={DeleteIcon}
+                          tone="critical"
+                          variant="tertiary"
+                          size="micro"
+                          onClick={() => handleDeleteTemplate(tmpl.id)}
+                          loading={
+                            isSubmitting &&
+                            activeJobId === `delete:${tmpl.id}`
+                          }
+                          accessibilityLabel="Delete template"
+                        />
+                      </Tooltip>
+                    </div>
+
+                    <div
+                      style={{
+                        display: "flex",
+                        flexWrap: "wrap",
+                        gap: "6px",
+                      }}
+                    >
+                      <Badge tone={formatBadgeTone(tmpl.format)}>
+                        {formatLabel(tmpl.format)}
+                      </Badge>
+                      {tmpl.filters?.status?.length > 0 ? (
+                        tmpl.filters.status.map((s) => (
+                          <Badge key={s}>{s}</Badge>
+                        ))
+                      ) : (
+                        <Badge>all statuses</Badge>
+                      )}
+                    </div>
+
+                    <div
+                      style={{
+                        display: "flex",
+                        justifyContent: "space-between",
+                        alignItems: "center",
+                        gap: "8px",
+                        marginTop: "auto",
+                      }}
+                    >
+                      <Text as="span" variant="bodySm" tone="subdued">
+                        {tmpl.runCount > 0
+                          ? `${tmpl.runCount} run${tmpl.runCount === 1 ? "" : "s"} · ${timeAgo(tmpl.lastRunAt)}`
+                          : "Never run"}
+                      </Text>
+                      <Button
+                        variant="primary"
+                        icon={ExportIcon}
+                        size="slim"
+                        onClick={() => handleRunTemplate(tmpl.id)}
+                        loading={
+                          isSubmitting && activeJobId === `run:${tmpl.id}`
+                        }
+                        disabled={!canExport}
+                      >
+                        Run
+                      </Button>
+                    </div>
+                  </div>
+                ))}
+              </InlineGrid>
+            </BlockStack>
+          </Card>
+        )}
+
         <Layout>
           <Layout.Section variant="oneThird">
             <Card>
@@ -475,19 +733,29 @@ export default function ExportsPage() {
                   )}
                 </BlockStack>
 
-                <Button
-                  variant="primary"
-                  icon={ExportIcon}
-                  onClick={handleCreateExport}
-                  loading={isCreatingExport}
-                  disabled={!canExport}
-                  fullWidth
-                  size="large"
-                >
-                  {isCreatingExport ? "Exporting..." : "Create Export"}
-                </Button>
+                <BlockStack gap="200">
+                  <Button
+                    variant="primary"
+                    icon={ExportIcon}
+                    onClick={handleCreateExport}
+                    loading={isCreatingExport}
+                    disabled={!canExport}
+                    fullWidth
+                    size="large"
+                  >
+                    {isCreatingExport ? "Exporting..." : "Create Export"}
+                  </Button>
+                  <Button
+                    variant="tertiary"
+                    onClick={() => setSaveModalOpen(true)}
+                    fullWidth
+                  >
+                    Save as template
+                  </Button>
+                </BlockStack>
               </BlockStack>
             </Card>
+
           </Layout.Section>
 
           <Layout.Section>
@@ -519,13 +787,20 @@ export default function ExportsPage() {
                 ) : (
                   <Box paddingBlock="800">
                     <BlockStack gap="300" inlineAlign="center">
-                      <Icon source={ExportIcon} tone="subdued" />
+                      <Box
+                        background="bg-surface-secondary"
+                        padding="300"
+                        borderRadius="full"
+                      >
+                        <Icon source={ExportIcon} tone="subdued" />
+                      </Box>
                       <BlockStack gap="100" inlineAlign="center">
                         <Text as="p" variant="headingSm">
                           No exports yet
                         </Text>
                         <Text as="p" variant="bodySm" tone="subdued" alignment="center">
-                          Create your first export using the form on the left
+                          Create your first export using the form on the left.
+                          Save it as a template to re-run with one click.
                         </Text>
                       </BlockStack>
                     </BlockStack>
@@ -538,6 +813,59 @@ export default function ExportsPage() {
 
         <Box paddingBlockEnd="400" />
       </BlockStack>
+
+      {saveModalOpen && (
+        <Modal
+          open
+          onClose={() => setSaveModalOpen(false)}
+          title="Save as template"
+          primaryAction={{
+            content: "Save template",
+            onAction: handleSaveTemplate,
+            disabled: !templateName.trim(),
+          }}
+          secondaryActions={[
+            {
+              content: "Cancel",
+              onAction: () => setSaveModalOpen(false),
+            },
+          ]}
+        >
+          <Modal.Section>
+            <BlockStack gap="300">
+              <Text as="p" variant="bodyMd" tone="subdued">
+                Save the current format and filters as a reusable template.
+                One click to re-run anytime.
+              </Text>
+              <TextField
+                label="Template name"
+                value={templateName}
+                onChange={setTemplateName}
+                placeholder="e.g. Monthly active subscribers"
+                autoComplete="off"
+                autoFocus
+              />
+              <BlockStack gap="100">
+                <Text as="span" variant="bodySm" fontWeight="semibold">
+                  Will save:
+                </Text>
+                <InlineStack gap="100" wrap>
+                  <Badge tone={formatBadgeTone(format[0])}>
+                    {formatLabel(format[0])}
+                  </Badge>
+                  {statusFilter.length > 0 ? (
+                    statusFilter.map((s) => <Badge key={s}>{s}</Badge>)
+                  ) : (
+                    <Text as="span" variant="bodySm" tone="subdued">
+                      All statuses
+                    </Text>
+                  )}
+                </InlineStack>
+              </BlockStack>
+            </BlockStack>
+          </Modal.Section>
+        </Modal>
+      )}
     </Page>
   );
 }

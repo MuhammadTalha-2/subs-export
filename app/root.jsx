@@ -1,5 +1,12 @@
 import { useState, useEffect } from "react";
-import { Links, Meta, Outlet, Scripts, ScrollRestoration } from "react-router";
+import {
+  Links,
+  Meta,
+  Outlet,
+  Scripts,
+  ScrollRestoration,
+  useLocation,
+} from "react-router";
 
 const criticalCss = `
   html, body {
@@ -216,9 +223,15 @@ function Skeleton() {
 }
 
 export default function App() {
-  const [ready, setReady] = useState(false);
+  const location = useLocation();
+  const isEmbeddedApp = location.pathname.startsWith("/app");
+  const [ready, setReady] = useState(!isEmbeddedApp);
 
   useEffect(() => {
+    if (!isEmbeddedApp) {
+      setReady(true);
+      return;
+    }
     let cancelled = false;
 
     function checkStyles() {
@@ -248,7 +261,7 @@ export default function App() {
       cancelled = true;
       clearTimeout(fallback);
     };
-  }, []);
+  }, [isEmbeddedApp]);
 
   return (
     <html lang="en">
@@ -265,12 +278,16 @@ export default function App() {
         <Links />
       </head>
       <body>
-        {!ready && <Skeleton />}
+        {isEmbeddedApp && !ready && <Skeleton />}
         <div
-          style={{
-            opacity: ready ? 1 : 0,
-            transition: "opacity 200ms ease",
-          }}
+          style={
+            isEmbeddedApp
+              ? {
+                  opacity: ready ? 1 : 0,
+                  transition: "opacity 200ms ease",
+                }
+              : undefined
+          }
         >
           <Outlet />
         </div>

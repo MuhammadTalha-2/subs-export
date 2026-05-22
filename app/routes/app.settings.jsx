@@ -36,6 +36,8 @@ import db from "../db.server";
 import { computeFirstRun } from "../services/scheduler.server";
 import { STATUS_VALUES } from "../utils/unified-schema";
 import { getGoogleAuthStatus, disconnectGoogle } from "../services/google-auth.server";
+import { verifySlackWebhook } from "../services/slack.server";
+import { encrypt } from "../utils/encryption.server";
 
 const DAYS_OF_WEEK = [
   { label: "Sunday", value: "0" },
@@ -98,11 +100,22 @@ export const action = async ({ request }) => {
     const dayOfWeek = formData.get("dayOfWeek");
     const hour = parseInt(formData.get("hour"), 10);
     const format = formData.get("format") || "csv";
+    const deliveryMethod = formData.get("deliveryMethod") || "email";
     const email = formData.get("email");
+    const slackWebhookUrl = formData.get("slackWebhookUrl");
     const statusFilter = formData.getAll("status");
 
-    if (!email || !email.includes("@")) {
-      return { error: "A valid email address is required." };
+    if (deliveryMethod === "email") {
+      if (!email || !email.includes("@")) {
+        return { error: "A valid email address is required." };
+      }
+    } else if (deliveryMethod === "slack") {
+      const valid = await verifySlackWebhook(slackWebhookUrl?.trim());
+      if (!valid.valid) {
+        return { error: `Slack webhook check failed: ${valid.error}` };
+      }
+    } else {
+      return { error: "Pick a delivery method." };
     }
 
     const filters = {};
@@ -121,15 +134,24 @@ export const action = async ({ request }) => {
         dayOfWeek: frequency === "weekly" ? parseInt(dayOfWeek, 10) : null,
         hour,
         timezone: "UTC",
-        deliveryMethod: "email",
-        email: email.trim(),
+        deliveryMethod,
+        email: deliveryMethod === "email" ? email.trim() : null,
+        slackWebhookUrlEnc:
+          deliveryMethod === "slack"
+            ? encrypt(slackWebhookUrl.trim())
+            : null,
         format,
         filtersJson: Object.keys(filters).length > 0 ? filters : undefined,
         nextRunAt,
       },
     });
 
-    return { success: "Scheduled export created." };
+    return {
+      success:
+        deliveryMethod === "slack"
+          ? "Scheduled export created. A test message was sent to Slack."
+          : "Scheduled export created.",
+    };
   }
 
   if (intent === "toggle_schedule") {
@@ -212,7 +234,9 @@ export default function SettingsPage() {
   const [dayOfWeek, setDayOfWeek] = useState("1");
   const [hour, setHour] = useState("8");
   const [format, setFormat] = useState("csv");
+  const [deliveryMethod, setDeliveryMethod] = useState("email");
   const [email, setEmail] = useState("");
+  const [slackWebhookUrl, setSlackWebhookUrl] = useState("");
   const [statusFilter, setStatusFilter] = useState([]);
   const [activeAction, setActiveAction] = useState(null);
 
@@ -228,10 +252,22 @@ export default function SettingsPage() {
     formData.set("dayOfWeek", dayOfWeek);
     formData.set("hour", hour);
     formData.set("format", format);
+    formData.set("deliveryMethod", deliveryMethod);
     formData.set("email", email);
+    formData.set("slackWebhookUrl", slackWebhookUrl);
     statusFilter.forEach((s) => formData.append("status", s));
     fetcher.submit(formData, { method: "POST" });
-  }, [fetcher, frequency, dayOfWeek, hour, format, email, statusFilter]);
+  }, [
+    fetcher,
+    frequency,
+    dayOfWeek,
+    hour,
+    format,
+    deliveryMethod,
+    email,
+    slackWebhookUrl,
+    statusFilter,
+  ]);
 
   const handleToggle = useCallback(
     (scheduleId) => {
@@ -283,7 +319,9 @@ export default function SettingsPage() {
         {formatScheduleLabel(s)}
       </Text>
       <Text as="span" variant="bodySm" tone="subdued">
-        {s.email || "No email"}
+        {s.deliveryMethod === "slack"
+          ? "Slack webhook"
+          : s.email || "No destination"}
       </Text>
     </BlockStack>,
     <Badge key={`fmt-${s.id}`} tone={s.format === "csv" ? "info" : "success"}>
@@ -465,15 +503,51 @@ export default function SettingsPage() {
                     onChange={setFormat}
                   />
 
-                  <TextField
-                    label="Delivery email"
-                    type="email"
-                    value={email}
-                    onChange={setEmail}
-                    placeholder="you@example.com"
-                    autoComplete="email"
-                    prefix={<Icon source={EmailIcon} tone="subdued" />}
+                  <Select
+                    label="Delivery method"
+                    options={[
+                      { label: "Email", value: "email" },
+                      { label: "Slack", value: "slack" },
+                    ]}
+                    value={deliveryMethod}
+                    onChange={setDeliveryMethod}
                   />
+
+                  {deliveryMethod === "email" && (
+                    <TextField
+                      label="Delivery email"
+                      type="email"
+                      value={email}
+                      onChange={setEmail}
+                      placeholder="you@example.com"
+                      autoComplete="email"
+                      prefix={<Icon source={EmailIcon} tone="subdued" />}
+                    />
+                  )}
+
+                  {deliveryMethod === "slack" && (
+                    <TextField
+                      label="Slack webhook URL"
+                      type="url"
+                      value={slackWebhookUrl}
+                      onChange={setSlackWebhookUrl}
+                      placeholder="https://hooks.slack.com/services/..."
+                      autoComplete="off"
+                      helpText={
+                        <span>
+                          Create an Incoming Webhook in your Slack workspace at{" "}
+                          <a
+                            href="https://api.slack.com/apps"
+                            target="_blank"
+                            rel="noreferrer"
+                          >
+                            api.slack.com/apps
+                          </a>
+                          . A test message will be sent on save.
+                        </span>
+                      }
+                    />
+                  )}
                 </BlockStack>
 
                 <Divider />
@@ -518,7 +592,11 @@ export default function SettingsPage() {
                   loading={isCreating}
                   fullWidth
                   size="large"
-                  disabled={!email}
+                  disabled={
+                    deliveryMethod === "email"
+                      ? !email
+                      : !slackWebhookUrl
+                  }
                 >
                   {isCreating ? "Creating..." : "Create Schedule"}
                 </Button>
@@ -564,7 +642,8 @@ export default function SettingsPage() {
                           No schedules yet
                         </Text>
                         <Text as="p" variant="bodySm" tone="subdued" alignment="center">
-                          Create your first schedule to automatically export and email subscription data
+                          Use the form on the left to schedule recurring
+                          exports delivered to email or Slack.
                         </Text>
                       </BlockStack>
                     </BlockStack>
