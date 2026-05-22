@@ -1,0 +1,303 @@
+import { writeFile, mkdir, unlink, stat } from "fs/promises";
+import { join } from "path";
+import { stringify } from "csv-stringify/sync";
+import ExcelJS from "exceljs";
+import db from "../db.server";
+import { decrypt } from "../utils/encryption.server";
+import {
+  fetchRechargeSubscriptions,
+  mapRechargeToUnified,
+} from "./recharge.server";
+import {
+  fetchSealSubscriptions,
+  mapSealToUnified,
+} from "./seal.server";
+import {
+  fetchSkioSubscriptions,
+  mapSkioToUnified,
+} from "./skio.server";
+import {
+  fetchLoopSubscriptions,
+  mapLoopToUnified,
+} from "./loop.server";
+import {
+  fetchPayWhirlSubscriptions,
+  mapPayWhirlToUnified,
+} from "./paywhirl.server";
+import {
+  fetchBoldSubscriptions,
+  mapBoldToUnified,
+} from "./bold.server";
+import { generateDemoData } from "./demo-data.server";
+import { applyFilters } from "../utils/filters.server";
+import { UNIFIED_FIELDS } from "../utils/unified-schema";
+import { pushToGoogleSheets } from "./google-sheets.server";
+
+const EXPORTS_DIR = join(process.cwd(), "exports");
+
+const PLAN_LIMITS = {
+  free: { maxExports: 5, maxRows: 500 },
+  starter: { maxExports: 30, maxRows: 5000 },
+  growth: { maxExports: 100, maxRows: 25000 },
+  pro: { maxExports: Infinity, maxRows: Infinity },
+};
+
+async function ensureExportsDir() {
+  await mkdir(EXPORTS_DIR, { recursive: true });
+}
+
+function buildFilename(shopDomain, format, filters) {
+  const shop = shopDomain.replace(".myshopify.com", "");
+  const date = new Date().toISOString().split("T")[0];
+  const filterTag = filters?.status?.length
+    ? `_${filters.status.join("-")}`
+    : "";
+  return `subsexport_${shop}${filterTag}_${date}.${format === "xlsx" ? "xlsx" : "csv"}`;
+}
+
+export async function checkExportLimits(shop) {
+  const limits = PLAN_LIMITS[shop.plan] || PLAN_LIMITS.free;
+
+  if (shop.monthlyExportCount >= limits.maxExports) {
+    return {
+      allowed: false,
+      reason: `Monthly export limit reached (${limits.maxExports} exports on ${shop.plan} plan). Upgrade to export more.`,
+    };
+  }
+
+  return { allowed: true, maxRows: limits.maxRows };
+}
+
+async function fetchAllSubscriptionData(shopId) {
+  const connections = await db.appConnection.findMany({
+    where: { shopId, status: "connected" },
+  });
+
+  let allRows = [];
+
+  for (const conn of connections) {
+    if (conn.appName === "demo") {
+      allRows.push(...generateDemoData(150));
+    } else if (conn.appName === "recharge") {
+      const apiKey = decrypt(conn.apiKeyEnc);
+      const rawSubs = await fetchRechargeSubscriptions(apiKey);
+      allRows.push(...rawSubs.map(mapRechargeToUnified));
+    } else if (conn.appName === "seal") {
+      const apiKey = decrypt(conn.apiKeyEnc);
+      const rawSubs = await fetchSealSubscriptions(apiKey);
+      allRows.push(...rawSubs.map(mapSealToUnified));
+    } else if (conn.appName === "skio") {
+      const apiKey = decrypt(conn.apiKeyEnc);
+      const rawSubs = await fetchSkioSubscriptions(apiKey);
+      allRows.push(...rawSubs.map(mapSkioToUnified));
+    } else if (conn.appName === "loop") {
+      const apiKey = decrypt(conn.apiKeyEnc);
+      const rawSubs = await fetchLoopSubscriptions(apiKey);
+      allRows.push(...rawSubs.map(mapLoopToUnified));
+    } else if (conn.appName === "paywhirl") {
+      const creds = JSON.parse(decrypt(conn.apiKeyEnc));
+      const rawSubs = await fetchPayWhirlSubscriptions(creds);
+      allRows.push(...rawSubs.map(mapPayWhirlToUnified));
+    } else if (conn.appName === "bold") {
+      const creds = JSON.parse(decrypt(conn.apiKeyEnc));
+      const rawSubs = await fetchBoldSubscriptions(creds);
+      allRows.push(...rawSubs.map(mapBoldToUnified));
+    }
+  }
+
+  return allRows;
+}
+
+function generateCsvBuffer(rows, fields) {
+  const headers = fields.map((f) => f.key);
+  const labels = fields.map((f) => f.label);
+
+  const data = rows.map((row) =>
+    headers.map((key) => {
+      const val = row[key];
+      if (val === null || val === undefined) return "";
+      return String(val);
+    }),
+  );
+
+  const csvContent = stringify([labels, ...data]);
+  return Buffer.from("﻿" + csvContent, "utf-8");
+}
+
+async function generateXlsxBuffer(rows, fields, filters) {
+  const workbook = new ExcelJS.Workbook();
+  workbook.creator = "SubsExport";
+  workbook.created = new Date();
+
+  const sheet = workbook.addWorksheet("Subscriptions");
+
+  sheet.columns = fields.map((f) => ({
+    header: f.label,
+    key: f.key,
+    width: f.type === "date" ? 14 : f.type === "decimal" ? 12 : 20,
+  }));
+
+  const headerRow = sheet.getRow(1);
+  headerRow.font = { bold: true };
+  headerRow.fill = {
+    type: "pattern",
+    pattern: "solid",
+    fgColor: { argb: "FFE8E8E8" },
+  };
+
+  sheet.views = [{ state: "frozen", ySplit: 1 }];
+
+  for (const row of rows) {
+    const rowData = {};
+    for (const f of fields) {
+      let val = row[f.key];
+      if (f.type === "decimal" && val != null) val = parseFloat(val);
+      if (f.type === "integer" && val != null) val = parseInt(val, 10);
+      rowData[f.key] = val ?? "";
+    }
+    sheet.addRow(rowData);
+  }
+
+  const infoSheet = workbook.addWorksheet("Export Info");
+  infoSheet.columns = [
+    { header: "Property", key: "prop", width: 25 },
+    { header: "Value", key: "val", width: 40 },
+  ];
+  infoSheet.getRow(1).font = { bold: true };
+
+  infoSheet.addRow({ prop: "Export Date", val: new Date().toISOString() });
+  infoSheet.addRow({ prop: "Total Rows", val: rows.length });
+  infoSheet.addRow({ prop: "Fields Exported", val: fields.length });
+
+  if (filters) {
+    if (filters.status?.length) {
+      infoSheet.addRow({
+        prop: "Status Filter",
+        val: filters.status.join(", "),
+      });
+    }
+    if (filters.product) {
+      infoSheet.addRow({ prop: "Product Filter", val: filters.product });
+    }
+  }
+
+  return workbook.xlsx.writeBuffer();
+}
+
+export async function processExport(jobId) {
+  const job = await db.exportJob.findUnique({
+    where: { id: jobId },
+    include: { shop: true },
+  });
+
+  if (!job) throw new Error("Export job not found");
+
+  await db.exportJob.update({
+    where: { id: jobId },
+    data: { status: "processing" },
+  });
+
+  try {
+    const allRows = await fetchAllSubscriptionData(job.shopId);
+    const filters = job.filtersJson || {};
+    const filtered = applyFilters(allRows, filters);
+
+    const limits = PLAN_LIMITS[job.shop.plan] || PLAN_LIMITS.free;
+    const maxRows = limits.maxRows;
+    const truncated = filtered.length > maxRows;
+    const rows = truncated ? filtered.slice(0, maxRows) : filtered;
+
+    const fields = UNIFIED_FIELDS;
+
+    if (job.format === "gsheets") {
+      const result = await pushToGoogleSheets(
+        job.shopId,
+        rows,
+        filters,
+        job.shop.shopDomain,
+      );
+
+      await db.exportJob.update({
+        where: { id: jobId },
+        data: {
+          status: "complete",
+          rowCount: rows.length,
+          filePath: result.spreadsheetUrl,
+          completedAt: new Date(),
+          errorMessage: truncated
+            ? `Export truncated to ${maxRows} rows (${job.shop.plan} plan limit). ${filtered.length} total matched.`
+            : null,
+        },
+      });
+
+      await db.shop.update({
+        where: { id: job.shopId },
+        data: { monthlyExportCount: { increment: 1 } },
+      });
+
+      return { success: true, rowCount: rows.length, truncated, spreadsheetUrl: result.spreadsheetUrl };
+    }
+
+    let buffer;
+    if (job.format === "xlsx") {
+      buffer = await generateXlsxBuffer(rows, fields, filters);
+    } else {
+      buffer = generateCsvBuffer(rows, fields);
+    }
+
+    await ensureExportsDir();
+    const filename = buildFilename(job.shop.shopDomain, job.format, filters);
+    const filePath = join(EXPORTS_DIR, filename);
+    await writeFile(filePath, buffer);
+
+    await db.exportJob.update({
+      where: { id: jobId },
+      data: {
+        status: "complete",
+        rowCount: rows.length,
+        filePath: filename,
+        completedAt: new Date(),
+        errorMessage: truncated
+          ? `Export truncated to ${maxRows} rows (${job.shop.plan} plan limit). ${filtered.length} total matched.`
+          : null,
+      },
+    });
+
+    await db.shop.update({
+      where: { id: job.shopId },
+      data: { monthlyExportCount: { increment: 1 } },
+    });
+
+    return { success: true, rowCount: rows.length, truncated };
+  } catch (error) {
+    await db.exportJob.update({
+      where: { id: jobId },
+      data: {
+        status: "failed",
+        errorMessage: error.message,
+        completedAt: new Date(),
+      },
+    });
+    throw error;
+  }
+}
+
+export async function getExportFilePath(filename) {
+  const filePath = join(EXPORTS_DIR, filename);
+  try {
+    await stat(filePath);
+    return filePath;
+  } catch {
+    return null;
+  }
+}
+
+export async function deleteExportFile(filename) {
+  if (!filename) return;
+  const filePath = join(EXPORTS_DIR, filename);
+  try {
+    await unlink(filePath);
+  } catch {
+    // file already deleted
+  }
+}
