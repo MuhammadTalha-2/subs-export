@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import { useLoaderData, useSearchParams, useNavigation, useNavigate } from "react-router";
 import {
   Page,
@@ -11,7 +11,9 @@ import {
   Button,
   DataTable,
   TextField,
+  Select,
   ChoiceList,
+  Pagination,
   EmptyState,
   Spinner,
   Banner,
@@ -20,13 +22,14 @@ import {
   Icon,
   Collapsible,
   ButtonGroup,
+  Modal,
+  Tooltip,
 } from "@shopify/polaris";
 import {
   FilterIcon,
   ViewIcon,
   SearchIcon,
-  ChevronUpIcon,
-  ChevronDownIcon,
+  ChevronRightIcon,
 } from "@shopify/polaris-icons";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
@@ -61,7 +64,13 @@ import { generateDemoData } from "../services/demo-data.server";
 import { applyFilters, parseFiltersFromParams } from "../utils/filters.server";
 import { UNIFIED_FIELDS, STATUS_VALUES } from "../utils/unified-schema";
 
-const PREVIEW_LIMIT = 50;
+const MAX_FETCH = 5000;
+const PAGE_SIZE_OPTIONS = [
+  { label: "25 per page", value: "25" },
+  { label: "50 per page", value: "50" },
+  { label: "100 per page", value: "100" },
+  { label: "250 per page", value: "250" },
+];
 
 const DEFAULT_VISIBLE_COLUMNS = [
   "customer_email",
@@ -169,10 +178,14 @@ export const loader = async ({ request }) => {
     statusCounts[s] = (statusCounts[s] || 0) + 1;
   }
 
+  const capped = filtered.slice(0, MAX_FETCH);
+
   return {
-    rows: filtered.slice(0, PREVIEW_LIMIT),
+    rows: capped,
     totalFetched: filtered.length,
+    totalCapped: capped.length,
     totalUnfiltered: allRows.length,
+    cap: MAX_FETCH,
     connectedApps,
     statusCounts,
     error,
@@ -183,7 +196,9 @@ export default function PreviewPage() {
   const {
     rows,
     totalFetched,
+    totalCapped,
     totalUnfiltered,
+    cap,
     connectedApps,
     statusCounts,
     error,
@@ -202,10 +217,20 @@ export default function PreviewPage() {
   const [productFilter, setProductFilter] = useState(
     searchParams.get("product") || "",
   );
-  const [filtersOpen, setFiltersOpen] = useState(true);
-  const [columnsOpen, setColumnsOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [pageSize, setPageSize] = useState("50");
+  const [pageIndex, setPageIndex] = useState(0);
+  const [sortColumnIndex, setSortColumnIndex] = useState(null);
+  const [sortDirection, setSortDirection] = useState("ascending");
+  const [openPanel, setOpenPanel] = useState(null);
+  const [selectedRow, setSelectedRow] = useState(null);
+  const filtersOpen = openPanel === "filters";
+  const columnsOpen = openPanel === "columns";
+  const togglePanel = (panel) =>
+    setOpenPanel((current) => (current === panel ? null : panel));
 
-  const hasActiveFilters = statusFilter.length > 0 || productFilter.length > 0;
+  const hasActiveFilters =
+    statusFilter.length > 0 || productFilter.length > 0 || searchQuery.length > 0;
 
   const handleFilterChange = useCallback(() => {
     const params = new URLSearchParams();
@@ -217,6 +242,7 @@ export default function PreviewPage() {
   const handleClearFilters = useCallback(() => {
     setStatusFilter([]);
     setProductFilter("");
+    setSearchQuery("");
     setSearchParams(new URLSearchParams());
   }, [setSearchParams]);
 
@@ -224,15 +250,190 @@ export default function PreviewPage() {
     visibleColumns.includes(f.key),
   );
 
-  const tableHeadings = activeFields.map((f) => f.label);
-  const tableRows = rows.map((row) =>
-    activeFields.map((f) => {
-      const val = row[f.key];
-      if (val === null || val === undefined || val === "") return "—";
-      if (f.type === "decimal") return Number(val).toFixed(2);
-      return String(val);
-    }),
-  );
+  const searchedRows = (() => {
+    if (!searchQuery.trim()) return rows;
+    const q = searchQuery.trim().toLowerCase();
+    return rows.filter((row) => {
+      const fields = [
+        row.customer_email,
+        row.customer_first_name,
+        row.customer_last_name,
+        row.customer_phone,
+        row.product_title,
+        row.variant_title,
+        row.sku,
+        row.subscription_id,
+        row.customer_id,
+      ];
+      return fields.some(
+        (v) => v && String(v).toLowerCase().includes(q),
+      );
+    });
+  })();
+
+  const sortedRows = (() => {
+    if (sortColumnIndex === null || !activeFields[sortColumnIndex]) {
+      return searchedRows;
+    }
+    const field = activeFields[sortColumnIndex];
+    const direction = sortDirection === "descending" ? -1 : 1;
+    const copy = [...searchedRows];
+    copy.sort((a, b) => {
+      const va = a[field.key];
+      const vb = b[field.key];
+      const aEmpty = va === null || va === undefined || va === "";
+      const bEmpty = vb === null || vb === undefined || vb === "";
+      if (aEmpty && bEmpty) return 0;
+      if (aEmpty) return 1;
+      if (bEmpty) return -1;
+      if (field.type === "decimal" || field.type === "integer") {
+        return (parseFloat(va) - parseFloat(vb)) * direction;
+      }
+      if (field.type === "date") {
+        return (new Date(va).getTime() - new Date(vb).getTime()) * direction;
+      }
+      return String(va).localeCompare(String(vb)) * direction;
+    });
+    return copy;
+  })();
+
+  const size = parseInt(pageSize, 10) || 50;
+  const totalPages = Math.max(1, Math.ceil(sortedRows.length / size));
+  const currentPage = Math.min(pageIndex, totalPages - 1);
+  const pageStart = currentPage * size;
+  const pageEnd = Math.min(pageStart + size, sortedRows.length);
+  const pagedRows = sortedRows.slice(pageStart, pageEnd);
+
+  useEffect(() => {
+    setPageIndex(0);
+  }, [pageSize, sortedRows.length, searchQuery]);
+
+  const handleSort = useCallback((index, dir) => {
+    setSortColumnIndex(index);
+    setSortDirection(dir);
+  }, []);
+
+  const statusToneMap = {
+    active: "success",
+    paused: "attention",
+    cancelled: "critical",
+    expired: undefined,
+    failed: "critical",
+  };
+
+  function formatDateDisplay(value) {
+    if (!value) return null;
+    try {
+      const d = new Date(value);
+      if (isNaN(d.getTime())) return value;
+      return d.toLocaleDateString(undefined, {
+        month: "short",
+        day: "numeric",
+        year: "numeric",
+      });
+    } catch {
+      return value;
+    }
+  }
+
+  function renderCell(field, row) {
+    const val = row[field.key];
+    if (val === null || val === undefined || val === "") {
+      return (
+        <Text as="span" variant="bodySm" tone="subdued">
+          —
+        </Text>
+      );
+    }
+
+    if (field.key === "subscription_status") {
+      const tone = statusToneMap[String(val).toLowerCase()];
+      const label = String(val).charAt(0).toUpperCase() + String(val).slice(1);
+      return <Badge tone={tone}>{label}</Badge>;
+    }
+
+    if (field.type === "date") {
+      return (
+        <Text as="span" variant="bodySm">
+          {formatDateDisplay(val)}
+        </Text>
+      );
+    }
+
+    if (field.type === "decimal") {
+      const num = parseFloat(val);
+      const currency = row.currency || "USD";
+      const formatted = isNaN(num) ? String(val) : num.toFixed(2);
+      if (field.key === "price_per_cycle" || field.key === "total_revenue_to_date") {
+        return (
+          <Text as="span" variant="bodySm" fontWeight="medium">
+            {formatted} {currency}
+          </Text>
+        );
+      }
+      return (
+        <Text as="span" variant="bodySm">
+          {formatted}
+        </Text>
+      );
+    }
+
+    if (field.type === "integer") {
+      return (
+        <Text as="span" variant="bodySm" fontWeight="medium">
+          {Number(val).toLocaleString()}
+        </Text>
+      );
+    }
+
+    if (field.key === "customer_email") {
+      return (
+        <Text as="span" variant="bodySm" truncate>
+          {String(val)}
+        </Text>
+      );
+    }
+
+    if (field.key === "product_title" || field.key === "variant_title") {
+      return (
+        <Text as="span" variant="bodySm" fontWeight="medium">
+          {String(val)}
+        </Text>
+      );
+    }
+
+    return (
+      <Text as="span" variant="bodySm">
+        {String(val)}
+      </Text>
+    );
+  }
+
+  const tableHeadings = [...activeFields.map((f) => f.label), ""];
+  const tableRows = pagedRows.map((row, rowIdx) => [
+    ...activeFields.map((f) => renderCell(f, row)),
+    <Tooltip key={`view-${rowIdx}`} content="View details">
+      <Button
+        icon={ChevronRightIcon}
+        variant="tertiary"
+        size="slim"
+        onClick={() => setSelectedRow(row)}
+        accessibilityLabel="View subscription details"
+      />
+    </Tooltip>,
+  ]);
+
+  const sortableArray = [
+    ...activeFields.map(() => true),
+    false,
+  ];
+
+  const columnContentTypes = [
+    ...activeFields.map((f) =>
+      f.type === "decimal" || f.type === "integer" ? "numeric" : "text",
+    ),
+    "text",
+  ];
 
   if (connectedApps.length === 0) {
     return (
@@ -292,150 +493,162 @@ export default function PreviewPage() {
           ))}
         </InlineStack>
 
+        <Card>
+          <BlockStack gap="300">
+            <InlineStack gap="300" align="space-between" blockAlign="center" wrap>
+              <InlineStack gap="200" blockAlign="center" wrap>
+                <Button
+                  icon={FilterIcon}
+                  onClick={() => togglePanel("filters")}
+                  pressed={filtersOpen}
+                >
+                  Filters
+                  {hasActiveFilters
+                    ? ` (${statusFilter.length + (productFilter ? 1 : 0)})`
+                    : ""}
+                </Button>
+                <Button
+                  icon={ViewIcon}
+                  onClick={() => togglePanel("columns")}
+                  pressed={columnsOpen}
+                >
+                  Columns ({visibleColumns.length}/{UNIFIED_FIELDS.length})
+                </Button>
+                {hasActiveFilters && (
+                  <Button variant="plain" onClick={handleClearFilters}>
+                    Clear all
+                  </Button>
+                )}
+              </InlineStack>
+              <Box minWidth="320px">
+                <TextField
+                  label="Search subscriptions"
+                  labelHidden
+                  value={searchQuery}
+                  onChange={setSearchQuery}
+                  placeholder="Search email, name, product, SKU…"
+                  autoComplete="off"
+                  prefix={<Icon source={SearchIcon} tone="subdued" />}
+                  clearButton
+                  onClearButtonClick={() => setSearchQuery("")}
+                />
+              </Box>
+            </InlineStack>
+
+            <Collapsible open={filtersOpen} id="filters-collapsible">
+              <Box paddingBlockStart="200">
+                <BlockStack gap="300">
+                  <Divider />
+                  <ChoiceList
+                    title="Filter by status"
+                    allowMultiple
+                    choices={STATUS_VALUES.map((s) => ({
+                      label: s.charAt(0).toUpperCase() + s.slice(1),
+                      value: s,
+                    }))}
+                    selected={statusFilter}
+                    onChange={setStatusFilter}
+                  />
+                  <InlineStack gap="200">
+                    <Button
+                      variant="primary"
+                      onClick={handleFilterChange}
+                      loading={isFilterLoading}
+                    >
+                      Apply Filters
+                    </Button>
+                  </InlineStack>
+                </BlockStack>
+              </Box>
+            </Collapsible>
+
+            <Collapsible open={columnsOpen} id="columns-collapsible">
+              <Box paddingBlockStart="200">
+                <BlockStack gap="300">
+                  <Divider />
+                  <InlineStack gap="200" blockAlign="center" align="space-between">
+                    <Text as="h3" variant="headingSm">
+                      Visible columns
+                    </Text>
+                    <ButtonGroup>
+                      <Button
+                        size="slim"
+                        onClick={() => setVisibleColumns(UNIFIED_FIELDS.map((f) => f.key))}
+                      >
+                        Select all
+                      </Button>
+                      <Button
+                        size="slim"
+                        onClick={() => setVisibleColumns(DEFAULT_VISIBLE_COLUMNS)}
+                      >
+                        Reset
+                      </Button>
+                    </ButtonGroup>
+                  </InlineStack>
+                  <ChoiceList
+                    title="Visible columns"
+                    titleHidden
+                    allowMultiple
+                    choices={UNIFIED_FIELDS.map((f) => ({
+                      label: f.label,
+                      value: f.key,
+                    }))}
+                    selected={visibleColumns}
+                    onChange={setVisibleColumns}
+                  />
+                </BlockStack>
+              </Box>
+            </Collapsible>
+          </BlockStack>
+        </Card>
+
         <Layout>
-          <Layout.Section variant="oneThird">
-            <BlockStack gap="300">
-              <Card>
-                <BlockStack gap="300">
-                  <InlineStack align="space-between" blockAlign="center">
-                    <InlineStack gap="200" blockAlign="center">
-                      <Icon source={FilterIcon} tone="subdued" />
-                      <Text as="h2" variant="headingMd">
-                        Filters
-                      </Text>
-                      {hasActiveFilters && (
-                        <Badge tone="attention">
-                          {statusFilter.length + (productFilter ? 1 : 0)}
-                        </Badge>
-                      )}
-                    </InlineStack>
-                    <Button
-                      icon={filtersOpen ? ChevronUpIcon : ChevronDownIcon}
-                      variant="tertiary"
-                      onClick={() => setFiltersOpen((o) => !o)}
-                      accessibilityLabel={filtersOpen ? "Collapse filters" : "Expand filters"}
-                    />
-                  </InlineStack>
-
-                  <Collapsible open={filtersOpen} id="filters-collapsible">
-                    <BlockStack gap="300">
-                      <ChoiceList
-                        title="Status"
-                        allowMultiple
-                        choices={STATUS_VALUES.map((s) => ({
-                          label: s.charAt(0).toUpperCase() + s.slice(1),
-                          value: s,
-                        }))}
-                        selected={statusFilter}
-                        onChange={setStatusFilter}
-                      />
-
-                      <TextField
-                        label="Product / SKU"
-                        value={productFilter}
-                        onChange={setProductFilter}
-                        placeholder="Search product, variant, or SKU"
-                        autoComplete="off"
-                        prefix={<Icon source={SearchIcon} tone="subdued" />}
-                      />
-
-                      <InlineStack gap="200">
-                        <Button variant="primary" onClick={handleFilterChange} loading={isFilterLoading}>
-                          Apply Filters
-                        </Button>
-                        {hasActiveFilters && (
-                          <Button onClick={handleClearFilters}>Clear</Button>
-                        )}
-                      </InlineStack>
-                    </BlockStack>
-                  </Collapsible>
-                </BlockStack>
-              </Card>
-
-              <Card>
-                <BlockStack gap="300">
-                  <InlineStack align="space-between" blockAlign="center">
-                    <InlineStack gap="200" blockAlign="center">
-                      <Icon source={ViewIcon} tone="subdued" />
-                      <Text as="h2" variant="headingMd">
-                        Columns
-                      </Text>
-                      <Badge>{visibleColumns.length} of {UNIFIED_FIELDS.length}</Badge>
-                    </InlineStack>
-                    <Button
-                      icon={columnsOpen ? ChevronUpIcon : ChevronDownIcon}
-                      variant="tertiary"
-                      onClick={() => setColumnsOpen((o) => !o)}
-                      accessibilityLabel={columnsOpen ? "Collapse columns" : "Expand columns"}
-                    />
-                  </InlineStack>
-
-                  <Collapsible open={columnsOpen} id="columns-collapsible">
-                    <BlockStack gap="200">
-                      <ChoiceList
-                        title="Visible columns"
-                        titleHidden
-                        allowMultiple
-                        choices={UNIFIED_FIELDS.map((f) => ({
-                          label: f.label,
-                          value: f.key,
-                        }))}
-                        selected={visibleColumns}
-                        onChange={setVisibleColumns}
-                      />
-                      <ButtonGroup>
-                        <Button
-                          size="slim"
-                          onClick={() => setVisibleColumns(UNIFIED_FIELDS.map((f) => f.key))}
-                        >
-                          Select All
-                        </Button>
-                        <Button
-                          size="slim"
-                          onClick={() => setVisibleColumns(DEFAULT_VISIBLE_COLUMNS)}
-                        >
-                          Reset
-                        </Button>
-                      </ButtonGroup>
-                    </BlockStack>
-                  </Collapsible>
-                </BlockStack>
-              </Card>
-            </BlockStack>
-          </Layout.Section>
-
           <Layout.Section>
             <Card>
               <BlockStack gap="300">
-                <InlineStack align="space-between" blockAlign="center">
+                <InlineStack align="space-between" blockAlign="center" wrap>
                   <InlineStack gap="200" blockAlign="center">
                     <Text as="h2" variant="headingMd">
                       Subscription Data
                     </Text>
                     <Badge>
-                      {totalFetched > PREVIEW_LIMIT
-                        ? `Showing ${PREVIEW_LIMIT} of ${totalFetched}`
-                        : `${rows.length} records`}
+                      {totalFetched.toLocaleString()}{" "}
+                      {totalFetched === 1 ? "record" : "records"}
                     </Badge>
+                    {isFilterLoading && <Spinner size="small" />}
                   </InlineStack>
-                  {isFilterLoading && <Spinner size="small" />}
+                  {rows.length > 0 && (
+                    <Box minWidth="160px">
+                      <Select
+                        label="Page size"
+                        labelHidden
+                        options={PAGE_SIZE_OPTIONS}
+                        value={pageSize}
+                        onChange={setPageSize}
+                      />
+                    </Box>
+                  )}
                 </InlineStack>
 
                 <Divider />
 
-                {rows.length > 0 ? (
-                  <div style={{ overflowX: "auto" }}>
+                {sortedRows.length > 0 ? (
+                  <div
+                    style={{
+                      overflowX: "auto",
+                      marginInline: "calc(-1 * var(--p-space-400))",
+                      paddingInline: "var(--p-space-400)",
+                    }}
+                  >
                     <DataTable
-                      columnContentTypes={activeFields.map((f) =>
-                        f.type === "decimal" || f.type === "integer"
-                          ? "numeric"
-                          : "text",
-                      )}
+                      columnContentTypes={columnContentTypes}
                       headings={tableHeadings}
                       rows={tableRows}
+                      sortable={sortableArray}
+                      defaultSortDirection="ascending"
+                      initialSortColumnIndex={sortColumnIndex ?? undefined}
+                      onSort={handleSort}
                       stickyHeader
-                      hasZebraStripingOnData
-                      increasedTableDensity
                     />
                   </div>
                 ) : (
@@ -453,13 +666,32 @@ export default function PreviewPage() {
                   </Box>
                 )}
 
-                {rows.length > 0 && totalFetched > PREVIEW_LIMIT && (
+                {sortedRows.length > 0 && (
                   <>
                     <Divider />
-                    <InlineStack align="center">
+                    <InlineStack align="space-between" blockAlign="center" wrap>
                       <Text as="p" variant="bodySm" tone="subdued">
-                        Showing first {PREVIEW_LIMIT} of {totalFetched} records. Export to see all data.
+                        Showing {(pageStart + 1).toLocaleString()}–
+                        {pageEnd.toLocaleString()} of{" "}
+                        {sortedRows.length.toLocaleString()}
+                        {searchQuery
+                          ? ` filtered from ${rows.length.toLocaleString()}`
+                          : ""}
+                        {totalFetched > cap
+                          ? ` (capped at ${cap.toLocaleString()} — export for the full set)`
+                          : ""}
                       </Text>
+                      {totalPages > 1 && (
+                        <Pagination
+                          label={`Page ${currentPage + 1} of ${totalPages}`}
+                          hasPrevious={currentPage > 0}
+                          onPrevious={() => setPageIndex((p) => Math.max(0, p - 1))}
+                          hasNext={currentPage < totalPages - 1}
+                          onNext={() =>
+                            setPageIndex((p) => Math.min(totalPages - 1, p + 1))
+                          }
+                        />
+                      )}
                     </InlineStack>
                   </>
                 )}
@@ -470,6 +702,86 @@ export default function PreviewPage() {
 
         <Box paddingBlockEnd="400" />
       </BlockStack>
+
+      {selectedRow && (
+        <Modal
+          open
+          onClose={() => setSelectedRow(null)}
+          title="Subscription details"
+          large
+          secondaryActions={[
+            {
+              content: "Close",
+              onAction: () => setSelectedRow(null),
+            },
+          ]}
+        >
+          <Modal.Section>
+            <BlockStack gap="400">
+              <InlineStack gap="200" blockAlign="center">
+                <Text as="h3" variant="headingMd">
+                  {selectedRow.customer_first_name}{" "}
+                  {selectedRow.customer_last_name}
+                </Text>
+                <Badge
+                  tone={
+                    statusToneMap[
+                      String(selectedRow.subscription_status).toLowerCase()
+                    ]
+                  }
+                >
+                  {String(selectedRow.subscription_status)
+                    .charAt(0)
+                    .toUpperCase() +
+                    String(selectedRow.subscription_status).slice(1)}
+                </Badge>
+                {selectedRow._source && (
+                  <Badge>{selectedRow._source}</Badge>
+                )}
+              </InlineStack>
+              <Text as="p" variant="bodyMd" tone="subdued">
+                {selectedRow.customer_email}
+              </Text>
+
+              <Divider />
+
+              <BlockStack gap="200">
+                {UNIFIED_FIELDS.map((field) => {
+                  const val = selectedRow[field.key];
+                  const display =
+                    val === null || val === undefined || val === ""
+                      ? "—"
+                      : field.type === "date"
+                        ? formatDateDisplay(val)
+                        : field.type === "decimal"
+                          ? Number(val).toFixed(2)
+                          : String(val);
+                  return (
+                    <InlineStack
+                      key={field.key}
+                      align="space-between"
+                      blockAlign="start"
+                      gap="400"
+                      wrap={false}
+                    >
+                      <Text
+                        as="span"
+                        variant="bodySm"
+                        tone="subdued"
+                      >
+                        {field.label}
+                      </Text>
+                      <Text as="span" variant="bodySm">
+                        {display}
+                      </Text>
+                    </InlineStack>
+                  );
+                })}
+              </BlockStack>
+            </BlockStack>
+          </Modal.Section>
+        </Modal>
+      )}
     </Page>
   );
 }
