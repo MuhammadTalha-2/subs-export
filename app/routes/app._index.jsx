@@ -29,6 +29,10 @@ import {
   ChevronUpIcon,
   ChevronDownIcon,
   XSmallIcon,
+  AlertCircleIcon,
+  AlertTriangleIcon,
+  PauseCircleIcon,
+  ArrowRightIcon,
 } from "@shopify/polaris-icons";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
@@ -129,11 +133,38 @@ export const loader = async ({ request }) => {
 
       const statusCounts = {};
       let totalRevenue = 0;
+      let failedCount = 0;
+      let overdueCount = 0;
+      let recentlyCancelledCount = 0;
+
+      const today = new Date().toISOString().split("T")[0];
+      const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000)
+        .toISOString()
+        .split("T")[0];
+
       for (const row of allRows) {
         const status = row.subscription_status || "unknown";
         statusCounts[status] = (statusCounts[status] || 0) + 1;
         if (row.total_revenue_to_date) {
           totalRevenue += parseFloat(row.total_revenue_to_date) || 0;
+        }
+
+        if (status === "failed") failedCount += 1;
+
+        if (
+          status === "active" &&
+          row.next_charge_date &&
+          row.next_charge_date < today
+        ) {
+          overdueCount += 1;
+        }
+
+        if (
+          row.cancellation_date &&
+          row.cancellation_date >= thirtyDaysAgo &&
+          row.cancellation_date <= today
+        ) {
+          recentlyCancelledCount += 1;
         }
       }
 
@@ -141,6 +172,14 @@ export const loader = async ({ request }) => {
         total: allRows.length,
         statusCounts,
         totalRevenue: totalRevenue.toFixed(2),
+        atRisk: {
+          failed: failedCount,
+          overdue: overdueCount,
+          paused: statusCounts.paused || 0,
+          recentlyCancelled: recentlyCancelledCount,
+          today,
+          thirtyDaysAgo,
+        },
       };
     } catch (err) {
       console.error("Dashboard stats error:", err.message);
@@ -163,6 +202,77 @@ export const loader = async ({ request }) => {
     subscriptionStats,
   };
 };
+
+function AtRiskTile({ label, value, description, icon, tone, onClick }) {
+  const toneBg = {
+    critical: "bg-surface-critical",
+    warning: "bg-surface-warning",
+    subdued: "bg-surface-secondary",
+  };
+  const toneIcon = {
+    critical: "critical",
+    warning: "warning",
+    subdued: "subdued",
+  };
+  return (
+    <div
+      role="button"
+      tabIndex={0}
+      onClick={onClick}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onClick();
+        }
+      }}
+      style={{
+        cursor: "pointer",
+        textAlign: "left",
+        background: "var(--p-color-bg-surface)",
+        border: "1px solid var(--p-color-border-secondary)",
+        borderRadius: "var(--p-border-radius-200)",
+        padding: "var(--p-space-300)",
+        transition: "background 120ms ease, border-color 120ms ease",
+      }}
+      onMouseEnter={(e) => {
+        e.currentTarget.style.background = "var(--p-color-bg-surface-hover)";
+        e.currentTarget.style.borderColor = "var(--p-color-border)";
+      }}
+      onMouseLeave={(e) => {
+        e.currentTarget.style.background = "var(--p-color-bg-surface)";
+        e.currentTarget.style.borderColor = "var(--p-color-border-secondary)";
+      }}
+    >
+      <BlockStack gap="200">
+        <InlineStack
+          align="space-between"
+          blockAlign="center"
+          wrap={false}
+        >
+          <Box
+            background={toneBg[tone] || "bg-surface-secondary"}
+            padding="200"
+            borderRadius="200"
+          >
+            <Icon source={icon} tone={toneIcon[tone] || "subdued"} />
+          </Box>
+          <Icon source={ArrowRightIcon} tone="subdued" />
+        </InlineStack>
+        <BlockStack gap="050">
+          <Text as="span" variant="bodySm" tone="subdued">
+            {label}
+          </Text>
+          <Text as="span" variant="heading2xl" fontWeight="bold">
+            {value.toLocaleString()}
+          </Text>
+          <Text as="span" variant="bodySm" tone="subdued">
+            {description}
+          </Text>
+        </BlockStack>
+      </BlockStack>
+    </div>
+  );
+}
 
 function StatCard({ title, value, icon, children }) {
   return (
@@ -411,6 +521,75 @@ export default function Index() {
             </InlineGrid>
           </Layout.Section>
         </Layout>
+
+        {subscriptionStats?.atRisk && (
+          <Card>
+            <BlockStack gap="400">
+              <BlockStack gap="100" inlineAlign="start">
+                <div
+                  style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: 8,
+                  }}
+                >
+                  <Icon source={AlertCircleIcon} tone="critical" />
+                  <Text as="h2" variant="headingMd" fontWeight="semibold">
+                    Needs Attention
+                  </Text>
+                </div>
+                <Text as="p" variant="bodySm" tone="subdued">
+                  Subscribers at risk of churn — click any tile to investigate
+                </Text>
+              </BlockStack>
+
+              <Divider />
+
+              <InlineGrid columns={{ xs: 1, sm: 2, md: 4 }} gap="300">
+                <AtRiskTile
+                  label="Failed payments"
+                  value={subscriptionStats.atRisk.failed}
+                  description="Need recovery"
+                  icon={AlertTriangleIcon}
+                  tone="critical"
+                  onClick={() => navigate("/app/preview?status=failed")}
+                />
+                <AtRiskTile
+                  label="Overdue charges"
+                  value={subscriptionStats.atRisk.overdue}
+                  description="Missed billing"
+                  icon={ClockIcon}
+                  tone="critical"
+                  onClick={() =>
+                    navigate(
+                      `/app/preview?status=active&next_charge_to=${subscriptionStats.atRisk.today}`,
+                    )
+                  }
+                />
+                <AtRiskTile
+                  label="Paused"
+                  value={subscriptionStats.atRisk.paused}
+                  description="May reactivate"
+                  icon={PauseCircleIcon}
+                  tone="warning"
+                  onClick={() => navigate("/app/preview?status=paused")}
+                />
+                <AtRiskTile
+                  label="Cancelled (30d)"
+                  value={subscriptionStats.atRisk.recentlyCancelled}
+                  description="Recent churn"
+                  icon={XSmallIcon}
+                  tone="subdued"
+                  onClick={() =>
+                    navigate(
+                      `/app/preview?cancellation_from=${subscriptionStats.atRisk.thirtyDaysAgo}`,
+                    )
+                  }
+                />
+              </InlineGrid>
+            </BlockStack>
+          </Card>
+        )}
 
         <Layout>
           <Layout.Section>
