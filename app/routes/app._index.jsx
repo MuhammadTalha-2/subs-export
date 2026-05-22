@@ -65,6 +65,7 @@ import {
 } from "../services/bold.server";
 import { generateDemoData } from "../services/demo-data.server";
 import { getGoogleAuthStatus } from "../services/google-auth.server";
+import { computeCohortRetention } from "../utils/cohort.server";
 
 export const loader = async ({ request }) => {
   const { session } = await authenticate.admin(request);
@@ -168,6 +169,8 @@ export const loader = async ({ request }) => {
         }
       }
 
+      const cohortData = computeCohortRetention(allRows, 6);
+
       subscriptionStats = {
         total: allRows.length,
         statusCounts,
@@ -180,6 +183,7 @@ export const loader = async ({ request }) => {
           today,
           thirtyDaysAgo,
         },
+        cohorts: cohortData,
       };
     } catch (err) {
       console.error("Dashboard stats error:", err.message);
@@ -202,6 +206,120 @@ export const loader = async ({ request }) => {
     subscriptionStats,
   };
 };
+
+function retentionTone(rate) {
+  if (rate === null) return null;
+  if (rate >= 80) return { bg: "#d3f4e1", fg: "#0a5c2d" };
+  if (rate >= 60) return { bg: "#e3f5d9", fg: "#3d6b1a" };
+  if (rate >= 40) return { bg: "#fcf3d4", fg: "#7a5b00" };
+  if (rate >= 20) return { bg: "#fbe2cc", fg: "#8a3d00" };
+  return { bg: "#fcd9d9", fg: "#a01919" };
+}
+
+function CohortTable({ cohorts, monthsBack }) {
+  const hasData = cohorts.some((c) => c.size > 0);
+
+  if (!hasData) {
+    return (
+      <Box paddingBlock="400">
+        <BlockStack gap="200" inlineAlign="center">
+          <Text as="p" variant="bodyMd" tone="subdued" alignment="center">
+            Not enough historical data yet. Cohort insights appear once you have
+            subscribers from at least one full month.
+          </Text>
+        </BlockStack>
+      </Box>
+    );
+  }
+
+  const offsetHeaders = [];
+  for (let i = 0; i < monthsBack; i++) {
+    offsetHeaders.push(i === 0 ? "Month 0" : `+${i}mo`);
+  }
+
+  const cellStyle = {
+    padding: "10px 12px",
+    fontSize: 13,
+    textAlign: "center",
+    borderBottom: "1px solid var(--p-color-border-secondary)",
+    whiteSpace: "nowrap",
+  };
+  const headerCellStyle = {
+    ...cellStyle,
+    fontWeight: 600,
+    color: "var(--p-color-text-secondary)",
+    background: "var(--p-color-bg-surface-secondary)",
+    fontSize: 12,
+    textTransform: "uppercase",
+    letterSpacing: 0.4,
+  };
+  const labelCellStyle = {
+    ...cellStyle,
+    textAlign: "left",
+    fontWeight: 500,
+  };
+
+  return (
+    <div style={{ overflowX: "auto" }}>
+      <table
+        style={{
+          width: "100%",
+          borderCollapse: "collapse",
+          minWidth: 640,
+        }}
+      >
+        <thead>
+          <tr>
+            <th style={{ ...headerCellStyle, textAlign: "left" }}>Cohort</th>
+            <th style={headerCellStyle}>Size</th>
+            {offsetHeaders.map((h) => (
+              <th key={h} style={headerCellStyle}>
+                {h}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {cohorts.map((cohort) => (
+            <tr key={cohort.key}>
+              <td style={labelCellStyle}>{cohort.label}</td>
+              <td style={{ ...cellStyle, color: "var(--p-color-text-secondary)" }}>
+                {cohort.size.toLocaleString()}
+              </td>
+              {cohort.retention.map((cell, idx) => {
+                if (cell.rate === null || cohort.size === 0) {
+                  return (
+                    <td
+                      key={idx}
+                      style={{ ...cellStyle, color: "var(--p-color-text-subdued)" }}
+                    >
+                      —
+                    </td>
+                  );
+                }
+                const tone = retentionTone(cell.rate);
+                return (
+                  <td
+                    key={idx}
+                    style={{
+                      ...cellStyle,
+                      background: tone?.bg,
+                      color: tone?.fg,
+                      fontWeight: 600,
+                    }}
+                    title={`${cell.retained} of ${cohort.size} retained`}
+                  >
+                    {cell.rate.toFixed(0)}%
+                  </td>
+                );
+              })}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
 
 function AtRiskTile({ label, value, description, icon, tone, onClick }) {
   const toneBg = {
@@ -587,6 +705,58 @@ export default function Index() {
                   }
                 />
               </InlineGrid>
+            </BlockStack>
+          </Card>
+        )}
+
+        {subscriptionStats?.cohorts && (
+          <Card>
+            <BlockStack gap="400">
+              <BlockStack gap="100" inlineAlign="start">
+                <Text as="h2" variant="headingMd">
+                  Cohort Retention
+                </Text>
+                <Text as="p" variant="bodySm" tone="subdued">
+                  % of subscribers from each signup month who are still active
+                  N months later
+                </Text>
+              </BlockStack>
+
+              <Divider />
+
+              <CohortTable
+                cohorts={subscriptionStats.cohorts.cohorts}
+                monthsBack={subscriptionStats.cohorts.monthsBack}
+              />
+
+              <Box paddingBlockStart="100">
+                <InlineStack gap="200" blockAlign="center" wrap>
+                  <Text as="span" variant="bodySm" tone="subdued">
+                    Retention scale:
+                  </Text>
+                  {[
+                    { label: "≥80%", bg: "#d3f4e1", fg: "#0a5c2d" },
+                    { label: "60–79%", bg: "#e3f5d9", fg: "#3d6b1a" },
+                    { label: "40–59%", bg: "#fcf3d4", fg: "#7a5b00" },
+                    { label: "20–39%", bg: "#fbe2cc", fg: "#8a3d00" },
+                    { label: "<20%", bg: "#fcd9d9", fg: "#a01919" },
+                  ].map((item) => (
+                    <span
+                      key={item.label}
+                      style={{
+                        padding: "2px 8px",
+                        background: item.bg,
+                        color: item.fg,
+                        fontSize: 12,
+                        fontWeight: 600,
+                        borderRadius: 4,
+                      }}
+                    >
+                      {item.label}
+                    </span>
+                  ))}
+                </InlineStack>
+              </Box>
             </BlockStack>
           </Card>
         )}
