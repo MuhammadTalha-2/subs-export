@@ -2,12 +2,11 @@
 
 client_id = "88c36501479f935fe7d278edff7fbd49"
 name = "SubsExport"
-application_url = "https://example.com"
+application_url = "https://subsexport.addoneplugins.com/"
 embedded = true
 
 [build]
 automatically_update_urls_on_dev = true
-include_config_on_deploy = true
 
 [webhooks]
 api_version = "2026-07"
@@ -30,4 +29,4 @@ api_version = "2026-07"
 scopes = "write_products,write_metaobjects,write_metaobject_definitions"
 
 [auth]
-redirect_urls = [ "https://example.com/api/auth" ]
+redirect_urls = [ "https://subsexport.addoneplugins.com/api/auth" ]
