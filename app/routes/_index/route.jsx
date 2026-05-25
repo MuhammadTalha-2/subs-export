@@ -36,7 +36,7 @@ const FEATURES = [
   },
   {
     title: "Track health & retention",
-    body: "Surface failed payments, paused subscribers, cohort retention, and 30-day growth — so you spot churn before it happens.",
+    body: "Surface failed payments, paused subscribers, cohort retention, and 30-day growth - so you spot churn before it happens.",
   },
   {
     title: "Search, sort, drill down",
@@ -44,7 +44,7 @@ const FEATURES = [
   },
   {
     title: "Secure & compliant",
-    body: "API keys encrypted at rest with AES-256. GDPR-compliant data handling. Read-only access — we never modify your subscriptions.",
+    body: "API keys encrypted at rest with AES-256. GDPR-compliant data handling. Read-only access - we never modify your subscriptions.",
   },
 ];
 
