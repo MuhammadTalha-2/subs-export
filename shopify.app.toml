@@ -2,7 +2,7 @@
 
 client_id = "88c36501479f935fe7d278edff7fbd49"
 name = "SubsExport"
-application_url = "https://subsexport.addoneplugins.com/"
+application_url = "https://subsexport.addoneplugins.com/app"
 embedded = true
 
 [build]

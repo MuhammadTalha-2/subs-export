@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import { redirect, Form, useLoaderData, Link } from "react-router";
 import { login } from "../../shopify.server";
 import styles from "./styles.module.css";
@@ -14,7 +15,15 @@ export const meta = () => [
 export const loader = async ({ request }) => {
   const url = new URL(request.url);
 
-  if (url.searchParams.get("shop")) {
+  // Any of these query params signal the request came from Shopify's embed,
+  // App Store install flow, or post-OAuth handoff. Send the merchant straight
+  // to the embedded app rather than the public marketing page.
+  const embedSignals = ["shop", "host", "embedded", "id_token", "session"];
+  const isShopifyContext = embedSignals.some((key) =>
+    url.searchParams.get(key),
+  );
+
+  if (isShopifyContext) {
     throw redirect(`/app?${url.searchParams.toString()}`);
   }
 
@@ -50,6 +59,18 @@ const FEATURES = [
 
 export default function App() {
   const { showForm } = useLoaderData();
+
+  // If this marketing page is ever rendered inside an iframe (only Shopify's
+  // admin embeds us), bounce to /app so the merchant lands on the dashboard
+  // instead of seeing the public landing page inside the admin shell.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const isFramed = window.self !== window.top;
+    if (isFramed) {
+      const params = new URLSearchParams(window.location.search);
+      window.location.replace(`/app${params.toString() ? `?${params}` : ""}`);
+    }
+  }, []);
 
   return (
     <div className={styles.page}>
