@@ -36,7 +36,6 @@ import { ensureShop } from "../utils/shop.server";
 import {
   processExport,
   checkExportLimits,
-  deleteExportFile,
 } from "../services/export.server";
 import { getGoogleAuthStatus } from "../services/google-auth.server";
 
@@ -157,7 +156,8 @@ export const action = async ({ request }) => {
     });
 
     if (job) {
-      await deleteExportFile(job.filePath);
+      // Deleting the row drops the stored file bytes with it — no separate
+      // disk cleanup needed now that exports live in Postgres.
       await db.exportJob.delete({ where: { id: jobId } });
       return { success: "Export deleted." };
     }

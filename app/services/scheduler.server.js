@@ -3,9 +3,6 @@ import { processExport } from "./export.server";
 import { sendExportEmail } from "./email.server";
 import { sendSlackExportNotification } from "./slack.server";
 import { decrypt } from "../utils/encryption.server";
-import { join } from "path";
-
-const EXPORTS_DIR = join(process.cwd(), "exports");
 
 function scheduleLabel(schedule) {
   if (schedule.frequency === "daily") return `Daily at ${schedule.hour}:00 UTC`;
@@ -58,13 +55,17 @@ async function executeScheduledExport(schedule) {
 
   const updatedJob = await db.exportJob.findUnique({ where: { id: job.id } });
 
-  if (schedule.deliveryMethod === "email" && schedule.email && updatedJob.filePath) {
-    const filePath = join(EXPORTS_DIR, updatedJob.filePath);
+  if (
+    schedule.deliveryMethod === "email" &&
+    schedule.email &&
+    updatedJob.filePath &&
+    updatedJob.fileContent
+  ) {
     await sendExportEmail({
       to: schedule.email,
       shopDomain: schedule.shop.shopDomain,
       filename: updatedJob.filePath,
-      filePath,
+      fileBuffer: Buffer.from(updatedJob.fileContent),
       rowCount: updatedJob.rowCount || 0,
       format: schedule.format,
     });

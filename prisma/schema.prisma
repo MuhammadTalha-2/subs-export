@@ -86,6 +86,7 @@ model ExportJob {
   status       String    @default("queued")
   rowCount     Int?      @map("row_count")
   filePath     String?   @map("file_path")
+  fileContent  Bytes?    @map("file_content")
   errorMessage String?   @map("error_message")
   createdAt    DateTime  @default(now()) @map("created_at")
   completedAt  DateTime? @map("completed_at")

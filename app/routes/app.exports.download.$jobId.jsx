@@ -1,27 +1,27 @@
-import { readFile } from "fs/promises";
 import { authenticate } from "../shopify.server";
 import { ensureShop } from "../utils/shop.server";
 import db from "../db.server";
-import { getExportFilePath } from "../services/export.server";
 
 export const loader = async ({ request, params }) => {
   const { session } = await authenticate.admin(request);
   const shop = await ensureShop(session.shop);
 
+  // Scope the lookup to the authenticated shop so a merchant can never download
+  // another shop's export by guessing a job id.
   const job = await db.exportJob.findFirst({
     where: { id: params.jobId, shopId: shop.id },
+    select: { filePath: true, fileContent: true, format: true },
   });
 
   if (!job || !job.filePath) {
     throw new Response("Export not found", { status: 404 });
   }
 
-  const fullPath = await getExportFilePath(job.filePath);
-  if (!fullPath) {
+  if (!job.fileContent) {
     throw new Response("File no longer available", { status: 410 });
   }
 
-  const fileBuffer = await readFile(fullPath);
+  const fileBuffer = Buffer.from(job.fileContent);
   const contentType =
     job.format === "xlsx"
       ? "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"

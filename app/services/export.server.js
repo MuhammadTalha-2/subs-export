@@ -1,5 +1,3 @@
-import { writeFile, mkdir, unlink, stat } from "fs/promises";
-import { join } from "path";
 import { stringify } from "csv-stringify/sync";
 import ExcelJS from "exceljs";
 import db from "../db.server";
@@ -33,8 +31,6 @@ import { applyFilters } from "../utils/filters.server";
 import { UNIFIED_FIELDS } from "../utils/unified-schema";
 import { pushToGoogleSheets } from "./google-sheets.server";
 
-const EXPORTS_DIR = join(process.cwd(), "exports");
-
 // Plan limits disabled during development. Re-enable tiered limits after Shopify approval + billing setup.
 const PLAN_LIMITS = {
   free: { maxExports: Infinity, maxRows: Infinity },
@@ -42,10 +38,6 @@ const PLAN_LIMITS = {
   growth: { maxExports: 100, maxRows: 25000 },
   pro: { maxExports: Infinity, maxRows: Infinity },
 };
-
-async function ensureExportsDir() {
-  await mkdir(EXPORTS_DIR, { recursive: true });
-}
 
 function buildFilename(shopDomain, format, filters) {
   const shop = shopDomain.replace(".myshopify.com", "");
@@ -239,10 +231,11 @@ export async function processExport(jobId) {
       buffer = generateCsvBuffer(rows, fields);
     }
 
-    await ensureExportsDir();
+    // Normalize to Node Buffer — exceljs.writeBuffer() returns an ArrayBuffer/Uint8Array
+    // depending on version, and Prisma's Bytes column needs Buffer/Uint8Array on insert.
+    const fileBuffer = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer);
+
     const filename = buildFilename(job.shop.shopDomain, job.format, filters);
-    const filePath = join(EXPORTS_DIR, filename);
-    await writeFile(filePath, buffer);
 
     await db.exportJob.update({
       where: { id: jobId },
@@ -250,6 +243,7 @@ export async function processExport(jobId) {
         status: "complete",
         rowCount: rows.length,
         filePath: filename,
+        fileContent: fileBuffer,
         completedAt: new Date(),
         errorMessage: truncated
           ? `Export truncated to ${maxRows} rows (${job.shop.plan} plan limit). ${filtered.length} total matched.`
@@ -276,22 +270,34 @@ export async function processExport(jobId) {
   }
 }
 
-export async function getExportFilePath(filename) {
-  const filePath = join(EXPORTS_DIR, filename);
-  try {
-    await stat(filePath);
-    return filePath;
-  } catch {
-    return null;
-  }
+/**
+ * Look up an export's file bytes by job id. Returns null when the job has no
+ * stored content (e.g. Google Sheets exports, failed jobs, or rows pre-dating
+ * the DB-backed storage migration).
+ */
+export async function getExportFileContent(jobId) {
+  const job = await db.exportJob.findUnique({
+    where: { id: jobId },
+    select: { fileContent: true, filePath: true, format: true },
+  });
+  if (!job || !job.fileContent) return null;
+  return {
+    filename: job.filePath,
+    format: job.format,
+    buffer: Buffer.from(job.fileContent),
+  };
 }
 
-export async function deleteExportFile(filename) {
-  if (!filename) return;
-  const filePath = join(EXPORTS_DIR, filename);
-  try {
-    await unlink(filePath);
-  } catch {
-    // file already deleted
-  }
+/**
+ * Clear stored bytes for a job (e.g. when the merchant deletes the export from
+ * history). The ExportJob row itself is removed by the caller; this helper is
+ * kept for symmetry with the old disk-based API in case future callers want to
+ * free storage without deleting the audit row.
+ */
+export async function clearExportFileContent(jobId) {
+  if (!jobId) return;
+  await db.exportJob.update({
+    where: { id: jobId },
+    data: { fileContent: null },
+  });
 }

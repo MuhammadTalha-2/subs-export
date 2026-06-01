@@ -1,11 +1,19 @@
 import { Resend } from "resend";
-import { readFile } from "fs/promises";
 
 const resend = new Resend(process.env.RESEND_API_KEY);
 const EMAIL_FROM = process.env.EMAIL_FROM || "SubsExport <exports@subsexport.com>";
 
-export async function sendExportEmail({ to, shopDomain, filename, filePath, rowCount, format }) {
-  const fileBuffer = await readFile(filePath);
+/**
+ * Send a scheduled export to the merchant via Resend.
+ *
+ * Accepts the file as an in-memory Buffer (sourced from ExportJob.fileContent
+ * in Postgres) rather than a filesystem path, because the production runtime
+ * has no writable persistent filesystem.
+ */
+export async function sendExportEmail({ to, shopDomain, filename, fileBuffer, rowCount, format }) {
+  if (!fileBuffer) {
+    throw new Error("sendExportEmail requires fileBuffer (no file path fallback in serverless)");
+  }
   const shop = shopDomain.replace(".myshopify.com", "");
 
   const { data, error } = await resend.emails.send({
