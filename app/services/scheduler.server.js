@@ -1,5 +1,5 @@
 import db from "../db.server";
-import { processExport } from "./export.server";
+import { processExport, getPlanLimits } from "./export.server";
 import { sendExportEmail } from "./email.server";
 import { sendSlackExportNotification } from "./slack.server";
 import { decrypt } from "../utils/encryption.server";
@@ -41,6 +41,31 @@ export async function runDueSchedules() {
 }
 
 async function executeScheduledExport(schedule) {
+  // Plan downgrades don't auto-delete schedules — a merchant on Free may still
+  // have a Growth-era schedule on the books. Re-check the cached plan tier and
+  // skip when their plan no longer allows the schedule. We advance nextRunAt
+  // anyway so the scheduler doesn't tight-loop on a permanently-blocked job.
+  const planLimits = getPlanLimits(schedule.shop.plan);
+  const skipReason = !planLimits.allowSchedules
+    ? "scheduled exports not on current plan"
+    : !planLimits.formats.includes(schedule.format)
+      ? `${schedule.format} format not on current plan`
+      : schedule.deliveryMethod === "slack" && !planLimits.allowSlackDelivery
+        ? "Slack delivery not on current plan"
+        : null;
+
+  if (skipReason) {
+    const nextRunAt = computeNextRun(schedule);
+    await db.scheduledExport.update({
+      where: { id: schedule.id },
+      data: { lastRunAt: now(), nextRunAt },
+    });
+    console.warn(
+      `Skipped scheduled export ${schedule.id} for shop ${schedule.shopId}: ${skipReason}`,
+    );
+    return { skipped: true, reason: skipReason, nextRunAt };
+  }
+
   const job = await db.exportJob.create({
     data: {
       shopId: schedule.shopId,

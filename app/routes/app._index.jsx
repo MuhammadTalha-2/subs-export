@@ -70,10 +70,17 @@ import OnboardingTour, {
   shouldShowOnboarding,
   resetOnboarding,
 } from "../components/OnboardingTour";
+import { LockedFeature } from "../components/LockedFeature";
+import { syncShopPlan } from "../services/billing.server";
 
 export const loader = async ({ request }) => {
-  const { session } = await authenticate.admin(request);
+  const { session, billing } = await authenticate.admin(request);
   const shop = await getShopWithConnections(session.shop);
+
+  // Sync the merchant's current plan from Shopify on every dashboard load —
+  // the dashboard is the most common landing route after a billing change,
+  // and we want gates to lift/lower the moment they return.
+  const { tier: planTier } = await syncShopPlan(billing, shop.id);
 
   const connectedApps =
     shop?.connections?.filter((c) => c.status === "connected") || [];
@@ -251,6 +258,7 @@ export const loader = async ({ request }) => {
     scheduledCount,
     googleConnected: googleAuth.connected,
     subscriptionStats,
+    planTier,
   };
 };
 
@@ -542,7 +550,12 @@ export default function Index() {
     scheduledCount,
     googleConnected,
     subscriptionStats,
+    planTier,
   } = useLoaderData();
+
+  // Free merchants see at-risk alerts and cohort retention behind a blurred
+  // upgrade prompt. Growth and Pro see them live.
+  const lockAdvancedAnalytics = planTier === "free";
 
   const navigate = useNavigate();
 
@@ -767,72 +780,79 @@ export default function Index() {
         </Layout>
 
         {subscriptionStats?.atRisk && (
-          <Card>
-            <BlockStack gap="400">
-              <BlockStack gap="100" inlineAlign="start">
-                <div
-                  style={{
-                    display: "inline-flex",
-                    alignItems: "center",
-                    gap: 8,
-                  }}
-                >
-                  <Icon source={AlertCircleIcon} tone="critical" />
-                  <Text as="h2" variant="headingMd" fontWeight="semibold">
-                    Needs Attention
+          <LockedFeature
+            locked={lockAdvancedAnalytics}
+            requiredPlan="growth"
+            featureName="At-risk subscriber alerts"
+            description="Spot failed payments, paused subscribers, and recent cancellations before they erode MRR."
+          >
+            <Card>
+              <BlockStack gap="400">
+                <BlockStack gap="100" inlineAlign="start">
+                  <div
+                    style={{
+                      display: "inline-flex",
+                      alignItems: "center",
+                      gap: 8,
+                    }}
+                  >
+                    <Icon source={AlertCircleIcon} tone="critical" />
+                    <Text as="h2" variant="headingMd" fontWeight="semibold">
+                      Needs Attention
+                    </Text>
+                  </div>
+                  <Text as="p" variant="bodySm" tone="subdued">
+                    Subscribers at risk of churn — click any tile to investigate
                   </Text>
-                </div>
-                <Text as="p" variant="bodySm" tone="subdued">
-                  Subscribers at risk of churn — click any tile to investigate
-                </Text>
+                </BlockStack>
+
+                <Divider />
+
+                <InlineGrid columns={{ xs: 1, sm: 2, md: 4 }} gap="300">
+                  <AtRiskTile
+                    label="Failed payments"
+                    value={subscriptionStats.atRisk.failed}
+                    description="Need recovery"
+                    icon={AlertTriangleIcon}
+                    tone="critical"
+                    onClick={() => navigate("/app/preview?status=failed")}
+                  />
+                  <AtRiskTile
+                    label="Overdue charges"
+                    value={subscriptionStats.atRisk.overdue}
+                    description="Missed billing"
+                    icon={ClockIcon}
+                    tone="critical"
+                    onClick={() =>
+                      navigate(
+                        `/app/preview?status=active&next_charge_to=${subscriptionStats.atRisk.today}`,
+                      )
+                    }
+                  />
+                  <AtRiskTile
+                    label="Paused"
+                    value={subscriptionStats.atRisk.paused}
+                    description="May reactivate"
+                    icon={PauseCircleIcon}
+                    tone="warning"
+                    onClick={() => navigate("/app/preview?status=paused")}
+                  />
+                  <AtRiskTile
+                    label="Cancelled (30d)"
+                    value={subscriptionStats.atRisk.recentlyCancelled}
+                    description="Recent churn"
+                    icon={XSmallIcon}
+                    tone="subdued"
+                    onClick={() =>
+                      navigate(
+                        `/app/preview?cancellation_from=${subscriptionStats.atRisk.thirtyDaysAgo}`,
+                      )
+                    }
+                  />
+                </InlineGrid>
               </BlockStack>
-
-              <Divider />
-
-              <InlineGrid columns={{ xs: 1, sm: 2, md: 4 }} gap="300">
-                <AtRiskTile
-                  label="Failed payments"
-                  value={subscriptionStats.atRisk.failed}
-                  description="Need recovery"
-                  icon={AlertTriangleIcon}
-                  tone="critical"
-                  onClick={() => navigate("/app/preview?status=failed")}
-                />
-                <AtRiskTile
-                  label="Overdue charges"
-                  value={subscriptionStats.atRisk.overdue}
-                  description="Missed billing"
-                  icon={ClockIcon}
-                  tone="critical"
-                  onClick={() =>
-                    navigate(
-                      `/app/preview?status=active&next_charge_to=${subscriptionStats.atRisk.today}`,
-                    )
-                  }
-                />
-                <AtRiskTile
-                  label="Paused"
-                  value={subscriptionStats.atRisk.paused}
-                  description="May reactivate"
-                  icon={PauseCircleIcon}
-                  tone="warning"
-                  onClick={() => navigate("/app/preview?status=paused")}
-                />
-                <AtRiskTile
-                  label="Cancelled (30d)"
-                  value={subscriptionStats.atRisk.recentlyCancelled}
-                  description="Recent churn"
-                  icon={XSmallIcon}
-                  tone="subdued"
-                  onClick={() =>
-                    navigate(
-                      `/app/preview?cancellation_from=${subscriptionStats.atRisk.thirtyDaysAgo}`,
-                    )
-                  }
-                />
-              </InlineGrid>
-            </BlockStack>
-          </Card>
+            </Card>
+          </LockedFeature>
         )}
 
         {subscriptionStats?.period && (
@@ -876,55 +896,62 @@ export default function Index() {
         )}
 
         {subscriptionStats?.cohorts && (
-          <Card>
-            <BlockStack gap="400">
-              <BlockStack gap="100" inlineAlign="start">
-                <Text as="h2" variant="headingMd">
-                  Cohort Retention
-                </Text>
-                <Text as="p" variant="bodySm" tone="subdued">
-                  % of subscribers from each signup month who are still active
-                  N months later
-                </Text>
-              </BlockStack>
-
-              <Divider />
-
-              <CohortTable
-                cohorts={subscriptionStats.cohorts.cohorts}
-                monthsBack={subscriptionStats.cohorts.monthsBack}
-              />
-
-              <Box paddingBlockStart="100">
-                <InlineStack gap="200" blockAlign="center" wrap>
-                  <Text as="span" variant="bodySm" tone="subdued">
-                    Retention scale:
+          <LockedFeature
+            locked={lockAdvancedAnalytics}
+            requiredPlan="growth"
+            featureName="Cohort retention analytics"
+            description="See which signup months retain and which leak, month over month."
+          >
+            <Card>
+              <BlockStack gap="400">
+                <BlockStack gap="100" inlineAlign="start">
+                  <Text as="h2" variant="headingMd">
+                    Cohort Retention
                   </Text>
-                  {[
-                    { label: "≥80%", bg: "#d3f4e1", fg: "#0a5c2d" },
-                    { label: "60–79%", bg: "#e3f5d9", fg: "#3d6b1a" },
-                    { label: "40–59%", bg: "#fcf3d4", fg: "#7a5b00" },
-                    { label: "20–39%", bg: "#fbe2cc", fg: "#8a3d00" },
-                    { label: "<20%", bg: "#fcd9d9", fg: "#a01919" },
-                  ].map((item) => (
-                    <span
-                      key={item.label}
-                      style={{
-                        padding: "2px 8px",
-                        background: item.bg,
-                        color: item.fg,
-                        fontSize: 12,
-                        fontWeight: 600,
-                        borderRadius: 4,
-                      }}
-                    >
-                      {item.label}
-                    </span>
-                  ))}
-                </InlineStack>
-              </Box>
-            </BlockStack>
-          </Card>
+                  <Text as="p" variant="bodySm" tone="subdued">
+                    % of subscribers from each signup month who are still active
+                    N months later
+                  </Text>
+                </BlockStack>
+
+                <Divider />
+
+                <CohortTable
+                  cohorts={subscriptionStats.cohorts.cohorts}
+                  monthsBack={subscriptionStats.cohorts.monthsBack}
+                />
+
+                <Box paddingBlockStart="100">
+                  <InlineStack gap="200" blockAlign="center" wrap>
+                    <Text as="span" variant="bodySm" tone="subdued">
+                      Retention scale:
+                    </Text>
+                    {[
+                      { label: "≥80%", bg: "#d3f4e1", fg: "#0a5c2d" },
+                      { label: "60–79%", bg: "#e3f5d9", fg: "#3d6b1a" },
+                      { label: "40–59%", bg: "#fcf3d4", fg: "#7a5b00" },
+                      { label: "20–39%", bg: "#fbe2cc", fg: "#8a3d00" },
+                      { label: "<20%", bg: "#fcd9d9", fg: "#a01919" },
+                    ].map((item) => (
+                      <span
+                        key={item.label}
+                        style={{
+                          padding: "2px 8px",
+                          background: item.bg,
+                          color: item.fg,
+                          fontSize: 12,
+                          fontWeight: 600,
+                          borderRadius: 4,
+                        }}
+                      >
+                        {item.label}
+                      </span>
+                    ))}
+                  </InlineStack>
+                </Box>
+              </BlockStack>
+            </Card>
+          </LockedFeature>
         )}
 
         <Layout>

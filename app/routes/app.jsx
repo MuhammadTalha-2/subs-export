@@ -50,6 +50,7 @@ export default function App() {
           <s-link href="/app/preview">Preview</s-link>
           <s-link href="/app/exports">Exports</s-link>
           <s-link href="/app/settings">Settings</s-link>
+          <s-link href="/app/plans">Plans</s-link>
         </s-app-nav>
         {routeSkeleton || <Outlet />}
       </PolarisAppProvider>

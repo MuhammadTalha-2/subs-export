@@ -31,13 +31,81 @@ import { applyFilters } from "../utils/filters.server";
 import { UNIFIED_FIELDS } from "../utils/unified-schema";
 import { pushToGoogleSheets } from "./google-sheets.server";
 
-// Plan limits disabled during development. Re-enable tiered limits after Shopify approval + billing setup.
-const PLAN_LIMITS = {
-  free: { maxExports: Infinity, maxRows: Infinity },
-  starter: { maxExports: 30, maxRows: 5000 },
-  growth: { maxExports: 100, maxRows: 25000 },
-  pro: { maxExports: Infinity, maxRows: Infinity },
+/**
+ * Plan limits — must match exactly what /app/plans (and the public pricing
+ * page on the App Store listing) advertise. Update both places together.
+ *
+ * - maxExports: rolling 30-day cap on the number of exports the merchant can
+ *   create; counter lives on shop.monthlyExportCount and resets when
+ *   shop.billingCycleStart is older than 30 days.
+ * - maxRows: per-export row cap; processExport() truncates the result set to
+ *   this size and stamps an errorMessage explaining the truncation.
+ * - formats: which output formats the merchant can pick when creating an
+ *   export or schedule.
+ * - maxTemplates: hard cap on saved templates per shop.
+ * - allowSchedules: whether the merchant can create scheduled exports at all.
+ * - allowSlackDelivery: whether the merchant can pick Slack as the delivery
+ *   channel for a scheduled export (email is allowed on any plan that has
+ *   schedules).
+ */
+export const PLAN_LIMITS = {
+  free: {
+    maxExports: 5,
+    maxRows: 250,
+    formats: ["csv"],
+    maxTemplates: 0,
+    allowSchedules: false,
+    allowSlackDelivery: false,
+  },
+  growth: {
+    maxExports: 50,
+    maxRows: 5000,
+    formats: ["csv", "xlsx", "gsheets"],
+    maxTemplates: 10,
+    allowSchedules: true,
+    allowSlackDelivery: false,
+  },
+  pro: {
+    maxExports: Infinity,
+    maxRows: Infinity,
+    formats: ["csv", "xlsx", "gsheets"],
+    maxTemplates: Infinity,
+    allowSchedules: true,
+    allowSlackDelivery: true,
+  },
 };
+
+export function getPlanLimits(planTier) {
+  return PLAN_LIMITS[planTier] || PLAN_LIMITS.free;
+}
+
+const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
+
+/**
+ * Reset shop.monthlyExportCount when the 30-day billing cycle window has
+ * elapsed (or has never been started). Returns the freshest shop record.
+ *
+ * Idempotent: callable on every export attempt. A null billingCycleStart is
+ * treated as "start a fresh cycle now."
+ */
+async function rolloverBillingCycleIfDue(shop) {
+  const now = new Date();
+  const cycleAgeMs = shop.billingCycleStart
+    ? now - shop.billingCycleStart
+    : Infinity;
+
+  if (cycleAgeMs >= THIRTY_DAYS_MS) {
+    return db.shop.update({
+      where: { id: shop.id },
+      data: {
+        billingCycleStart: now,
+        monthlyExportCount: 0,
+      },
+    });
+  }
+
+  return shop;
+}
 
 function buildFilename(shopDomain, format, filters) {
   const shop = shopDomain.replace(".myshopify.com", "");
@@ -48,10 +116,40 @@ function buildFilename(shopDomain, format, filters) {
   return `subsexport_${shop}${filterTag}_${date}.${format === "xlsx" ? "xlsx" : "csv"}`;
 }
 
-export async function checkExportLimits(shop) {
-  // Limits disabled during development. Re-enable after Shopify approval.
-  const limits = PLAN_LIMITS[shop.plan] || PLAN_LIMITS.free;
-  return { allowed: true, maxRows: limits.maxRows };
+/**
+ * Check whether the merchant is allowed to create a new export with the given
+ * format under their current plan. Performs the billing-cycle rollover as a
+ * side effect so callers don't have to.
+ *
+ * Returns either `{ allowed: true, maxRows, plan }` or
+ * `{ allowed: false, reason }`.
+ */
+export async function checkExportLimits(shop, { format } = {}) {
+  const refreshedShop = await rolloverBillingCycleIfDue(shop);
+  const limits = getPlanLimits(refreshedShop.plan);
+
+  if (refreshedShop.monthlyExportCount >= limits.maxExports) {
+    return {
+      allowed: false,
+      reason:
+        limits.maxExports === Infinity
+          ? "Export limit reached."
+          : `Monthly export limit reached (${limits.maxExports} on the ${refreshedShop.plan} plan). Upgrade for more exports this cycle.`,
+    };
+  }
+
+  if (format && !limits.formats.includes(format)) {
+    return {
+      allowed: false,
+      reason: `The ${format.toUpperCase()} format is not available on the ${refreshedShop.plan} plan. Upgrade to unlock additional formats.`,
+    };
+  }
+
+  return {
+    allowed: true,
+    maxRows: limits.maxRows,
+    plan: refreshedShop.plan,
+  };
 }
 
 async function fetchAllSubscriptionData(shopId) {
@@ -188,7 +286,18 @@ export async function processExport(jobId) {
     const filters = job.filtersJson || {};
     const filtered = applyFilters(allRows, filters);
 
-    const limits = PLAN_LIMITS[job.shop.plan] || PLAN_LIMITS.free;
+    const limits = getPlanLimits(job.shop.plan);
+
+    // Defense-in-depth: an action handler or scheduler should already have
+    // filtered the format against limits.formats, but guard inside processExport
+    // too in case a future caller forgets. Mark the job failed so the merchant
+    // sees a clear error in their export history.
+    if (!limits.formats.includes(job.format)) {
+      throw new Error(
+        `The ${job.format.toUpperCase()} format is not available on the ${job.shop.plan} plan.`,
+      );
+    }
+
     const maxRows = limits.maxRows;
     const truncated = filtered.length > maxRows;
     const rows = truncated ? filtered.slice(0, maxRows) : filtered;

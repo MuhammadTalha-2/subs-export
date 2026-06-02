@@ -18,6 +18,7 @@ import {
   Icon,
   Tooltip,
   InlineGrid,
+  Banner,
 } from "@shopify/polaris";
 import {
   DeleteIcon,
@@ -38,6 +39,9 @@ import { STATUS_VALUES } from "../utils/unified-schema";
 import { getGoogleAuthStatus, disconnectGoogle } from "../services/google-auth.server";
 import { verifySlackWebhook } from "../services/slack.server";
 import { encrypt } from "../utils/encryption.server";
+import { getPlanLimits } from "../services/export.server";
+import { syncShopPlan } from "../services/billing.server";
+import { LockedFeature } from "../components/LockedFeature";
 
 const DAYS_OF_WEEK = [
   { label: "Sunday", value: "0" },
@@ -55,8 +59,13 @@ const HOURS = Array.from({ length: 24 }, (_, i) => ({
 }));
 
 export const loader = async ({ request }) => {
-  const { session } = await authenticate.admin(request);
+  const { session, billing } = await authenticate.admin(request);
   const shop = await ensureShop(session.shop);
+
+  // Refresh plan from Shopify on every load so the schedule form gates always
+  // reflect the merchant's real entitlements.
+  const { tier: planTier } = await syncShopPlan(billing, shop.id);
+  const planLimits = getPlanLimits(planTier);
 
   const schedules = await db.scheduledExport.findMany({
     where: { shopId: shop.id },
@@ -86,6 +95,12 @@ export const loader = async ({ request }) => {
     googleAuth,
     googleConnected: googleConnected === "true",
     googleError: googleError || null,
+    planTier,
+    planLimits: {
+      formats: planLimits.formats,
+      allowSchedules: planLimits.allowSchedules,
+      allowSlackDelivery: planLimits.allowSlackDelivery,
+    },
   };
 };
 
@@ -104,6 +119,28 @@ export const action = async ({ request }) => {
     const email = formData.get("email");
     const slackWebhookUrl = formData.get("slackWebhookUrl");
     const statusFilter = formData.getAll("status");
+
+    // Defense-in-depth plan gating — UI restrictions are bypassable, so the
+    // action revalidates everything against the merchant's current plan.
+    const planLimits = getPlanLimits(shop.plan);
+
+    if (!planLimits.allowSchedules) {
+      return {
+        error:
+          "Scheduled exports aren't available on the Free plan. Upgrade to Growth or Pro to automate exports.",
+      };
+    }
+    if (!planLimits.formats.includes(format)) {
+      return {
+        error: `The ${format.toUpperCase()} format is not available on the ${shop.plan} plan.`,
+      };
+    }
+    if (deliveryMethod === "slack" && !planLimits.allowSlackDelivery) {
+      return {
+        error:
+          "Slack delivery is a Pro feature. Upgrade to Pro to deliver scheduled exports to Slack.",
+      };
+    }
 
     if (deliveryMethod === "email") {
       if (!email || !email.includes("@")) {
@@ -209,7 +246,14 @@ function formatNextRun(dateStr) {
 }
 
 export default function SettingsPage() {
-  const { schedules, googleAuth, googleConnected: justConnected, googleError } = useLoaderData();
+  const {
+    schedules,
+    googleAuth,
+    googleConnected: justConnected,
+    googleError,
+    planTier,
+    planLimits,
+  } = useLoaderData();
   const fetcher = useFetcher();
   const result = fetcher.data;
   const isSubmitting = fetcher.state !== "idle";
@@ -452,6 +496,12 @@ export default function SettingsPage() {
 
         <Layout>
           <Layout.Section variant="oneThird">
+            <LockedFeature
+              locked={!planLimits.allowSchedules}
+              requiredPlan="growth"
+              featureName="Scheduled exports"
+              description="Automatically deliver subscription data to email on a daily, weekly, or monthly cadence."
+            >
             <Card>
               <BlockStack gap="400">
                 <BlockStack gap="100">
@@ -497,7 +547,13 @@ export default function SettingsPage() {
                     label="Format"
                     options={[
                       { label: "CSV", value: "csv" },
-                      { label: "Excel (.xlsx)", value: "xlsx" },
+                      {
+                        label: planLimits.formats.includes("xlsx")
+                          ? "Excel (.xlsx)"
+                          : "Excel (.xlsx) — upgrade required",
+                        value: "xlsx",
+                        disabled: !planLimits.formats.includes("xlsx"),
+                      },
                     ]}
                     value={format}
                     onChange={setFormat}
@@ -507,10 +563,21 @@ export default function SettingsPage() {
                     label="Delivery method"
                     options={[
                       { label: "Email", value: "email" },
-                      { label: "Slack", value: "slack" },
+                      {
+                        label: planLimits.allowSlackDelivery
+                          ? "Slack"
+                          : "Slack — Pro only",
+                        value: "slack",
+                        disabled: !planLimits.allowSlackDelivery,
+                      },
                     ]}
                     value={deliveryMethod}
                     onChange={setDeliveryMethod}
+                    helpText={
+                      !planLimits.allowSlackDelivery
+                        ? "Slack delivery is a Pro feature."
+                        : undefined
+                    }
                   />
 
                   {deliveryMethod === "email" && (
@@ -593,15 +660,17 @@ export default function SettingsPage() {
                   fullWidth
                   size="large"
                   disabled={
-                    deliveryMethod === "email"
+                    !planLimits.allowSchedules ||
+                    (deliveryMethod === "email"
                       ? !email
-                      : !slackWebhookUrl
+                      : !slackWebhookUrl)
                   }
                 >
                   {isCreating ? "Creating..." : "Create Schedule"}
                 </Button>
               </BlockStack>
             </Card>
+            </LockedFeature>
           </Layout.Section>
 
           <Layout.Section>

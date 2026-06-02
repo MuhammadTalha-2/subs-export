@@ -36,10 +36,10 @@ import { ensureShop } from "../utils/shop.server";
 import {
   processExport,
   checkExportLimits,
+  getPlanLimits,
 } from "../services/export.server";
 import { getGoogleAuthStatus } from "../services/google-auth.server";
-
-const MONTHLY_LIMIT = 50;
+import { syncShopPlan } from "../services/billing.server";
 
 const STATUS_FILTERS = [
   { label: "Active", value: "active" },
@@ -50,8 +50,14 @@ const STATUS_FILTERS = [
 ];
 
 export const loader = async ({ request }) => {
-  const { session } = await authenticate.admin(request);
+  const { session, billing } = await authenticate.admin(request);
   const shop = await ensureShop(session.shop);
+
+  // Sync plan from Shopify on every load — cheap (single GraphQL) and means
+  // the moment a merchant lands here after a billing approval, the cached
+  // shop.plan is right.
+  const { tier: planTier } = await syncShopPlan(billing, shop.id);
+  const planLimits = getPlanLimits(planTier);
 
   const connections = await db.appConnection.findMany({
     where: { shopId: shop.id, status: "connected" },
@@ -63,7 +69,10 @@ export const loader = async ({ request }) => {
     take: 50,
   });
 
-  const limitCheck = await checkExportLimits(shop);
+  // Re-read shop after the plan sync so monthlyExportCount + billingCycleStart
+  // are current before checkExportLimits' rollover side effect runs.
+  const freshShop = await db.shop.findUnique({ where: { id: shop.id } });
+  const limitCheck = await checkExportLimits(freshShop);
   const googleAuth = await getGoogleAuthStatus(shop.id);
 
   let templates = [];
@@ -106,12 +115,21 @@ export const loader = async ({ request }) => {
       runCount: t.runCount,
     })),
     hasConnections: connections.length > 0,
-    exportCount: shop.monthlyExportCount,
+    exportCount: freshShop.monthlyExportCount,
     canExport: limitCheck.allowed,
     limitMessage: limitCheck.reason || null,
     googleConnected: googleAuth.connected,
     totalRowsExported,
     completedCount,
+    planTier,
+    planLimits: {
+      maxExports: planLimits.maxExports === Infinity ? null : planLimits.maxExports,
+      maxRows: planLimits.maxRows === Infinity ? null : planLimits.maxRows,
+      formats: planLimits.formats,
+      maxTemplates:
+        planLimits.maxTemplates === Infinity ? null : planLimits.maxTemplates,
+    },
+    templateCount: templates.length,
   };
 };
 
@@ -122,12 +140,15 @@ export const action = async ({ request }) => {
   const intent = formData.get("intent");
 
   if (intent === "create") {
-    const limitCheck = await checkExportLimits(shop);
+    const format = formData.get("format") || "csv";
+
+    // Pass format into the limits check so Free can't export Excel/Sheets even
+    // if a tampered form bypasses the UI gate.
+    const limitCheck = await checkExportLimits(shop, { format });
     if (!limitCheck.allowed) {
       return { error: limitCheck.reason };
     }
 
-    const format = formData.get("format") || "csv";
     const statusFilter = formData.getAll("status");
     const filters = {};
     if (statusFilter.length > 0) filters.status = statusFilter;
@@ -171,6 +192,33 @@ export const action = async ({ request }) => {
       return { error: "Template name is required." };
     }
     const format = formData.get("format") || "csv";
+
+    // Re-enforce plan gates on the action — UI gating alone is bypassable.
+    const planLimits = getPlanLimits(shop.plan);
+    if (planLimits.maxTemplates === 0) {
+      return {
+        error:
+          "Saved templates aren't available on the Free plan. Upgrade to Growth or Pro to save reusable templates.",
+      };
+    }
+    if (!planLimits.formats.includes(format)) {
+      return {
+        error: `The ${format.toUpperCase()} format is not available on the ${shop.plan} plan. Upgrade to unlock additional formats.`,
+      };
+    }
+
+    const existingCount = await db.exportTemplate.count({
+      where: { shopId: shop.id },
+    });
+    if (existingCount >= planLimits.maxTemplates) {
+      return {
+        error:
+          planLimits.maxTemplates === Infinity
+            ? "Template limit reached."
+            : `Template limit reached (${planLimits.maxTemplates} on the ${shop.plan} plan). Delete an existing template or upgrade to save more.`,
+      };
+    }
+
     const statusFilter = formData.getAll("status");
     const filters = {};
     if (statusFilter.length > 0) filters.status = statusFilter;
@@ -188,11 +236,6 @@ export const action = async ({ request }) => {
   }
 
   if (intent === "run_template") {
-    const limitCheck = await checkExportLimits(shop);
-    if (!limitCheck.allowed) {
-      return { error: limitCheck.reason };
-    }
-
     const templateId = formData.get("templateId");
     const template = await db.exportTemplate.findFirst({
       where: { id: templateId, shopId: shop.id },
@@ -200,6 +243,13 @@ export const action = async ({ request }) => {
 
     if (!template) {
       return { error: "Template not found." };
+    }
+
+    // Check limits against the template's stored format — a Free merchant who
+    // downgraded after saving an Excel template shouldn't be able to run it.
+    const limitCheck = await checkExportLimits(shop, { format: template.format });
+    if (!limitCheck.allowed) {
+      return { error: limitCheck.reason };
     }
 
     const job = await db.exportJob.create({
@@ -312,6 +362,9 @@ export default function ExportsPage() {
     googleConnected,
     totalRowsExported,
     completedCount,
+    planTier,
+    planLimits,
+    templateCount,
   } = useLoaderData();
   const fetcher = useFetcher();
   const navigate = useNavigate();
@@ -337,6 +390,12 @@ export default function ExportsPage() {
     }
   }, [result]);
 
+  // Plan-aware format choices. On Free, xlsx and gsheets are visible (so the
+  // merchant knows they exist) but disabled with an upgrade-prompt help text.
+  const allowedFormats = planLimits.formats;
+  const xlsxAllowedByPlan = allowedFormats.includes("xlsx");
+  const gsheetsAllowedByPlan = allowedFormats.includes("gsheets");
+
   const formatChoices = [
     {
       label: "CSV",
@@ -346,15 +405,20 @@ export default function ExportsPage() {
     {
       label: "Excel (.xlsx)",
       value: "xlsx",
-      helpText: "Microsoft Excel workbook",
+      helpText: xlsxAllowedByPlan
+        ? "Microsoft Excel workbook"
+        : "Available on Growth and Pro — upgrade in Plans",
+      disabled: !xlsxAllowedByPlan,
     },
     {
       label: "Google Sheets",
       value: "gsheets",
-      helpText: googleConnected
-        ? "Pushed to your Google Drive"
-        : "Connect Google in Settings to enable",
-      disabled: !googleConnected,
+      helpText: !gsheetsAllowedByPlan
+        ? "Available on Growth and Pro — upgrade in Plans"
+        : googleConnected
+          ? "Pushed to your Google Drive"
+          : "Connect Google in Settings to enable",
+      disabled: !gsheetsAllowedByPlan || !googleConnected,
     },
   ];
 
@@ -545,7 +609,11 @@ export default function ExportsPage() {
           <StatTile
             label="This month"
             value={`${exportCount}`}
-            sublabel={`of ${MONTHLY_LIMIT} exports`}
+            sublabel={
+              planLimits.maxExports
+                ? `of ${planLimits.maxExports} exports`
+                : "exports — unlimited"
+            }
             icon={ExportIcon}
             iconBg="bg-surface-info"
             iconTone="info"
@@ -745,13 +813,28 @@ export default function ExportsPage() {
                   >
                     {isCreatingExport ? "Exporting..." : "Create Export"}
                   </Button>
-                  <Button
-                    variant="tertiary"
-                    onClick={() => setSaveModalOpen(true)}
-                    fullWidth
-                  >
-                    Save as template
-                  </Button>
+                  {/*
+                    Free plan caps maxTemplates at 0 — show the button so the
+                    feature is discoverable, but disable it and wrap in a
+                    Tooltip explaining the upgrade requirement. The action
+                    handler revalidates the gate on submit (see
+                    intent="save_template") so this isn't bypassable.
+                  */}
+                  {planLimits.maxTemplates !== 0 ? (
+                    <Button
+                      variant="tertiary"
+                      onClick={() => setSaveModalOpen(true)}
+                      fullWidth
+                    >
+                      Save as template
+                    </Button>
+                  ) : (
+                    <Tooltip content="Saved templates are available on Growth and Pro. Upgrade to reuse export configs in one click.">
+                      <Button variant="tertiary" disabled fullWidth>
+                        Save as template — upgrade required
+                      </Button>
+                    </Tooltip>
+                  )}
                 </BlockStack>
               </BlockStack>
             </Card>
